@@ -1,0 +1,177 @@
+[
+  {
+    "actual_period": 26179,
+    "target_period": 26179,
+    "best_pos_hit": 2,
+    "best_accuracy": 0.6666666666666666,
+    "avg_accuracy": 0.1,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "Softmax回归",
+      "遗漏冷热",
+      "贝叶斯融合",
+      "加权频率",
+      "间隔规律",
+      "迷你RNN",
+      "AR自回归",
+      "EMA趋势",
+      "逐位马尔可夫"
+    ],
+    "combo_rank": [
+      "整注马尔可夫",
+      "各位融合分",
+      "形态匹配",
+      "蒙特卡洛"
+    ]
+  },
+  {
+    "actual_period": 26180,
+    "target_period": 26180,
+    "best_pos_hit": 1,
+    "best_accuracy": 0.3333333333333333,
+    "avg_accuracy": 0.06666666666666667,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "遗漏冷热",
+      "迷你RNN",
+      "AR自回归",
+      "贝叶斯融合",
+      "间隔规律",
+      "加权频率",
+      "逐位马尔可夫",
+      "Softmax回归",
+      "EMA趋势"
+    ],
+    "combo_rank": [
+      "形态匹配",
+      "整注马尔可夫",
+      "蒙特卡洛",
+      "各位融合分"
+    ]
+  },
+  {
+    "actual_period": 26181,
+    "target_period": 26181,
+    "best_pos_hit": 1,
+    "best_accuracy": 0.3333333333333333,
+    "avg_accuracy": 0.06666666666666667,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "逐位马尔可夫",
+      "AR自回归",
+      "Softmax回归",
+      "迷你RNN",
+      "加权频率",
+      "遗漏冷热",
+      "贝叶斯融合",
+      "间隔规律",
+      "EMA趋势"
+    ],
+    "combo_rank": [
+      "形态匹配",
+      "整注马尔可夫",
+      "蒙特卡洛",
+      "各位融合分"
+    ]
+  },
+  {
+    "actual_period": 26182,
+    "target_period": 26182,
+    "best_pos_hit": 1,
+    "best_accuracy": 0.3333333333333333,
+    "avg_accuracy": 0.13333333333333333,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "贝叶斯融合",
+      "遗漏冷热",
+      "加权频率",
+      "逐位马尔可夫",
+      "迷你RNN",
+      "间隔规律",
+      "AR自回归",
+      "Softmax回归",
+      "EMA趋势"
+    ],
+    "combo_rank": [
+      "整注马尔可夫",
+      "蒙特卡洛",
+      "形态匹配",
+      "各位融合分"
+    ]
+  },
+  {
+    "actual_period": 26183,
+    "target_period": 26183,
+    "best_pos_hit": 1,
+    "best_accuracy": 0.3333333333333333,
+    "avg_accuracy": 0.1,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "EMA趋势",
+      "迷你RNN",
+      "贝叶斯融合",
+      "加权频率",
+      "逐位马尔可夫",
+      "遗漏冷热",
+      "间隔规律",
+      "AR自回归",
+      "Softmax回归"
+    ],
+    "combo_rank": [
+      "整注马尔可夫",
+      "蒙特卡洛",
+      "形态匹配",
+      "各位融合分"
+    ]
+  },
+  {
+    "actual_period": 26184,
+    "target_period": 26184,
+    "best_pos_hit": 2,
+    "best_accuracy": 0.6666666666666666,
+    "avg_accuracy": 0.16666666666666666,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "Softmax回归",
+      "EMA趋势",
+      "遗漏冷热",
+      "AR自回归",
+      "迷你RNN",
+      "贝叶斯融合",
+      "加权频率",
+      "间隔规律",
+      "逐位马尔可夫"
+    ],
+    "combo_rank": [
+      "各位融合分",
+      "蒙特卡洛",
+      "整注马尔可夫",
+      "形态匹配"
+    ]
+  },
+  {
+    "actual_period": 26185,
+    "target_period": 26185,
+    "best_pos_hit": 1,
+    "best_accuracy": 0.3333333333333333,
+    "avg_accuracy": 0.13333333333333333,
+    "exact_in_top10": 0,
+    "digit_rank": [
+      "Softmax回归",
+      "贝叶斯融合",
+      "迷你RNN",
+      "遗漏冷热",
+      "加权频率",
+      "逐位马尔可夫",
+      "间隔规律",
+      "EMA趋势",
+      "AR自回归"
+    ],
+    "combo_rank": [
+      "整注马尔可夫",
+      "各位融合分",
+      "蒙特卡洛",
+      "形态匹配"
+    ]
+  }
+]

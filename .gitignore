@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# PyInstaller / build
+build/
+dist/
+*.spec
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Local runtime caches (keep sample history if you choose to commit data/)
+# Uncomment next lines if you do NOT want to publish personal draw history:
+# data/pl3/*.json
+# data/dlt/*.json
