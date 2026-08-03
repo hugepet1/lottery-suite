@@ -22,7 +22,27 @@ from . import db
 POOL = 80
 DRAW_N = 20
 PICK_N = 10
+PICK_N5 = 5
 LONG_TERM = (2, 11, 14, 27, 39, 49, 54, 62, 69, 75)
+
+SCHEME_KEYS_10 = (
+    "scheme1_anti_markov",
+    "scheme2_am_hotcold",
+    "scheme3_am_cold",
+)
+SCHEME_KEYS_5 = (
+    "scheme1_anti_markov_5",
+    "scheme2_am_hotcold_5",
+    "scheme3_am_cold_5",
+)
+SCHEME_LABELS = {
+    "scheme1_anti_markov": "方案1 反马尔可夫链（选10）",
+    "scheme2_am_hotcold": "方案2 反马尔可夫+热冷平衡（选10）",
+    "scheme3_am_cold": "方案3 反马尔可夫+冷号回补（选10）",
+    "scheme1_anti_markov_5": "方案1 反马尔可夫链（选5）",
+    "scheme2_am_hotcold_5": "方案2 反马尔可夫+热冷平衡（选5）",
+    "scheme3_am_cold_5": "方案3 反马尔可夫+冷号回补（选5）",
+}
 
 DEFAULT_WEIGHTS = {
     "freq": 0.20,
@@ -335,7 +355,7 @@ def top_n(scores: Dict[int, Dict[str, float]], n: int = 10, key: str = "total") 
 
 
 # ---------------------------------------------------------------------------
-# 组合生成：4 组方案 + 反马尔可夫变体
+# 组合生成：3 组算法 ×（选10 + 选5）
 # ---------------------------------------------------------------------------
 
 def _balance_pick(
@@ -349,18 +369,19 @@ def _balance_pick(
     """从候选中贪心选取，兼顾奇偶/大小/区间。"""
     chosen: List[int] = []
     zone_c = Counter()
+    # 选5时每区最多2个；选10时最多3个
+    zone_cap = min(max_zone, 2 if n <= 5 else 3)
     for cand in ranked:
         if len(chosen) >= n:
             break
         z = zone_of(cand)
-        if zone_c[z] >= max_zone:
+        if zone_c[z] >= zone_cap:
             continue
         trial = chosen + [cand]
-        if len(trial) >= 4:
+        if len(trial) >= max(3, n // 2):
             odd = sum(1 for x in trial if x % 2 == 1) / len(trial)
             big = sum(1 for x in trial if is_big(x)) / len(trial)
             if prefer_odd is not None and abs(odd - prefer_odd) > 0.35 and len(trial) < n:
-                # 仍可放行前期
                 if scores[cand]["total"] < 55:
                     continue
             if prefer_big is not None and abs(big - prefer_big) > 0.35 and len(trial) < n:
@@ -382,81 +403,39 @@ def predict_groups(
     weights: Optional[Dict[str, float]] = None,
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
+    """仅保留 3 组同型算法，各输出选10 + 选5。"""
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
     am = anti_markov_scores(draws)
-    gaps = current_gaps(draws)
-    freq_20 = appearance_counts(draws, 20)
-    trend = recent_trend(draws)
 
-    # 综合排名
-    ranked_total = sorted(range(1, POOL + 1), key=lambda n: scores[n]["total"], reverse=True)
-    # 反马尔可夫排名
     ranked_am = sorted(range(1, POOL + 1), key=lambda n: am[n], reverse=True)
-    # 冷号：高遗漏
-    ranked_cold = sorted(range(1, POOL + 1), key=lambda n: (gaps[n], -freq_20.get(n, 0)), reverse=True)
-    # 热号：近 20 期高频 + 趋势上行
-    ranked_hot = sorted(
-        range(1, POOL + 1),
-        key=lambda n: (freq_20.get(n, 0) * 2 + max(0, trend[n]) * 10 + scores[n]["total"] * 0.01),
-        reverse=True,
-    )
-
-    # 方案1：纯反马尔可夫链 Top10（带区间平衡）
-    scheme1 = _balance_pick(ranked_am, scores, PICK_N, max_zone=3)
-
-    # 方案2：反马尔可夫 + 热冷平衡（AM 与综合分融合）
     blend = {
         n: 0.55 * am[n] + 0.45 * scores[n]["total"] for n in range(1, POOL + 1)
     }
     ranked_blend = sorted(blend.keys(), key=lambda n: blend[n], reverse=True)
-    scheme2 = _balance_pick(ranked_blend, scores, PICK_N, max_zone=3)
-
-    # 方案3：反马尔可夫 + 冷号回补
     cold_blend = {
         n: 0.5 * am[n] + 0.35 * scores[n]["gap"] + 0.15 * scores[n]["hotcold"]
         for n in range(1, POOL + 1)
     }
     ranked_cb = sorted(cold_blend.keys(), key=lambda n: cold_blend[n], reverse=True)
-    scheme3 = _balance_pick(ranked_cb, scores, PICK_N, max_zone=3)
 
-    # 组1：综合模型
-    g1 = _balance_pick(ranked_total, scores, PICK_N, max_zone=3)
-    # 组2：冷号回补
-    g2 = _balance_pick(ranked_cold, scores, PICK_N, max_zone=4)
-    # 组3：热号延续
-    g3 = _balance_pick(ranked_hot, scores, PICK_N, max_zone=4)
-    # 组4：机器随机优化（高分池蒙特卡洛）
-    rng = random.Random(seed + 7)
-    pool = ranked_total[:28]
-    best = None
-    best_s = -1.0
-    for _ in range(800):
-        pick = sorted(rng.sample(pool, PICK_N))
-        s = sum(scores[n]["total"] for n in pick)
-        # 形态奖励
-        odd = sum(1 for x in pick if x % 2 == 1)
-        big = sum(1 for x in pick if is_big(x))
-        zones = len({zone_of(x) for x in pick})
-        cons = consecutive_pairs(pick)
-        s += (5 - abs(odd - 5)) * 3
-        s += (5 - abs(big - 5)) * 3
-        s += zones * 4
-        s += (2 - abs(cons - 2)) * 2
-        if s > best_s:
-            best_s = s
-            best = pick
-    g4 = best or g1
+    # 选10
+    scheme1 = _balance_pick(ranked_am, scores, PICK_N, max_zone=3)
+    scheme2 = _balance_pick(ranked_blend, scores, PICK_N, max_zone=3)
+    scheme3 = _balance_pick(ranked_cb, scores, PICK_N, max_zone=3)
+    # 选5（同算法，独立截取平衡）
+    scheme1_5 = _balance_pick(ranked_am, scores, PICK_N5, max_zone=2)
+    scheme2_5 = _balance_pick(ranked_blend, scores, PICK_N5, max_zone=2)
+    scheme3_5 = _balance_pick(ranked_cb, scores, PICK_N5, max_zone=2)
 
     return {
-        "core": g1,
-        "group1_ensemble": g1,
-        "group2_cold": g2,
-        "group3_hot": g3,
-        "group4_random_opt": g4,
+        "core": scheme2,
         "scheme1_anti_markov": scheme1,
         "scheme2_am_hotcold": scheme2,
         "scheme3_am_cold": scheme3,
+        "scheme1_anti_markov_5": scheme1_5,
+        "scheme2_am_hotcold_5": scheme2_5,
+        "scheme3_am_cold_5": scheme3_5,
     }
 
 
@@ -530,10 +509,12 @@ def review_prediction(
 ) -> Dict:
     ds = set(int(x) for x in draw_numbers)
     ps = [int(x) for x in pred_numbers]
+    pick_n = max(1, len(ps))
     hits = sorted(n for n in ps if n in ds)
     gaps = current_gaps(draws_before) if draws_before else {}
     freq_20 = appearance_counts(draws_before, 20) if draws_before else Counter()
     miss = [n for n in ps if n not in ds]
+    expect = pick_n * DRAW_N / POOL  # 随机期望命中
 
     reasons = {
         "遗漏判断错误": 0,
@@ -555,24 +536,24 @@ def review_prediction(
             reasons["冷热判断错误"] += 1
     pred_zones = Counter(zone_of(n) for n in ps)
     draw_zones = Counter(zone_of(n) for n in ds)
-    if sum(abs(pred_zones[z] - draw_zones.get(z, 0) * PICK_N / DRAW_N) for z in range(4)) > 4:
+    zone_tol = 2 if pick_n <= 5 else 4
+    if sum(abs(pred_zones[z] - draw_zones.get(z, 0) * pick_n / DRAW_N) for z in range(4)) > zone_tol:
         reasons["区域分布错误"] += 2
     pred_odd = sum(1 for n in ps if n % 2 == 1)
     draw_odd = sum(1 for n in ds if n % 2 == 1)
-    if abs(pred_odd / PICK_N - draw_odd / DRAW_N) > 0.2:
+    if abs(pred_odd / pick_n - draw_odd / DRAW_N) > 0.2:
         reasons["奇偶比例错误"] += 2
     pred_big = sum(1 for n in ps if is_big(n))
     draw_big = sum(1 for n in ds if is_big(n))
-    if abs(pred_big / PICK_N - draw_big / DRAW_N) > 0.2:
+    if abs(pred_big / pick_n - draw_big / DRAW_N) > 0.2:
         reasons["大小比例错误"] += 2
-    if abs(consecutive_pairs(ps) - consecutive_pairs(ds) * PICK_N / DRAW_N) > 1.5:
+    if abs(consecutive_pairs(ps) - consecutive_pairs(ds) * pick_n / DRAW_N) > 1.5:
         reasons["连号遗漏错误"] += 2
-    if len(hits) <= 2:
+    if len(hits) <= max(1, int(expect - 0.5)):
         reasons["模型权重错误"] += 3
-    elif len(hits) == 3:
+    elif len(hits) == int(expect):
         reasons["模型权重错误"] += 1
 
-    # 归一说明
     ranked_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)
     primary = [k for k, v in ranked_reasons if v > 0][:4] or ["样本随机波动为主"]
 
@@ -581,10 +562,31 @@ def review_prediction(
         "pred_numbers": sorted(ps),
         "hits": hits,
         "hit_count": len(hits),
-        "hit_rate": f"{len(hits)}/{PICK_N}",
+        "hit_rate": f"{len(hits)}/{pick_n}",
+        "pick_n": pick_n,
         "fail_reasons": reasons,
         "primary_reasons": primary,
     }
+
+
+def review_all_schemes(
+    draw_numbers: Sequence[int],
+    groups: Dict[str, List[int]],
+    draws_before: Sequence[Dict],
+    primary_key: str = "scheme2_am_hotcold",
+) -> Dict:
+    """复盘全部保留方案；主复盘用 primary_key。"""
+    details = {}
+    for key in list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5):
+        nums = groups.get(key)
+        if not nums:
+            continue
+        details[key] = review_prediction(draw_numbers, nums, draws_before)
+    primary_nums = groups.get(primary_key) or groups.get("scheme1_anti_markov") or []
+    primary = review_prediction(draw_numbers, primary_nums, draws_before)
+    primary["scheme_details"] = details
+    primary["scheme_key"] = primary_key
+    return primary
 
 
 def adjust_weights_from_review(
@@ -618,9 +620,10 @@ def adjust_weights_from_review(
             w[k] = 0.85 * w[k] + 0.15 * DEFAULT_WEIGHTS[k]
         notes.append("权重向默认值部分回归，降低过拟合")
 
-    if hit >= 4:
-        # 强化当前主力
-        bump("freq", 0.02, f"命中 {hit} 个表现尚可 → 微调强化频率/遗漏")
+    pick_n = int(review.get("pick_n") or len(review.get("pred_numbers") or []) or PICK_N)
+    good = 4 if pick_n >= 10 else 2
+    if hit >= good:
+        bump("freq", 0.02, f"命中 {hit}/{pick_n} 表现尚可 → 微调强化频率/遗漏")
         bump("gap", 0.01, "同步微调遗漏")
 
     w = _norm_weights(w)
@@ -637,9 +640,9 @@ def backtest(
     draws: Sequence[Dict],
     window: int = 50,
     weights: Optional[Dict[str, float]] = None,
-    scheme: str = "group1_ensemble",
+    scheme: str = "scheme2_am_hotcold",
 ) -> Dict:
-    """用前 i 期预测第 i+1 期的 10 码，统计最近 window 期命中。"""
+    """用前 i 期预测第 i+1 期，统计最近 window 期命中。"""
     if len(draws) < window + 15:
         window = max(10, len(draws) - 15)
     w = _norm_weights(weights or load_weights())
@@ -649,7 +652,7 @@ def backtest(
         hist = draws[:i]
         actual = set(draws[i]["numbers"])
         groups = predict_groups(hist, w, seed=1000 + i)
-        pred = groups.get(scheme) or groups["group1_ensemble"]
+        pred = groups.get(scheme) or groups["scheme2_am_hotcold"]
         hit = sum(1 for n in pred if n in actual)
         hits_list.append(hit)
     if not hits_list:
@@ -676,7 +679,9 @@ def backtest(
         "detail": {
             "scheme": scheme,
             "hits": hits_list,
-            "expected_random": round(10 * 20 / 80, 3),  # 2.5
+            "expected_random": round(
+                (5 if scheme.endswith("_5") else 10) * DRAW_N / POOL, 3
+            ),
         },
     }
 
@@ -774,20 +779,40 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
 
     # 复盘：仅当存在「针对最新已开奖期」的预测时才对比
     if last_pred and int(last_pred.get("target_period", -1)) == int(latest["period"]):
-        pred_nums = last_pred.get("numbers") or last_pred.get("core") or []
-        review_block = review_prediction(
-            latest["numbers"], pred_nums, draws[:-1]
+        prev_groups = last_pred.get("groups") or {}
+        if "scheme2_am_hotcold" not in prev_groups and last_pred.get("numbers"):
+            prev_groups = {
+                **prev_groups,
+                "scheme2_am_hotcold": last_pred["numbers"],
+            }
+        review_block = review_all_schemes(
+            latest["numbers"], prev_groups, draws[:-1], primary_key="scheme2_am_hotcold"
         )
+        # 若方案1更好，主复盘仍用方案2调权，但注明各组表现
         weights, adjust_notes = adjust_weights_from_review(weights, review_block)
+        best_key = max(
+            (k for k in SCHEME_KEYS_10 if k in review_block.get("scheme_details", {})),
+            key=lambda k: review_block["scheme_details"][k]["hit_count"],
+            default="scheme2_am_hotcold",
+        )
+        if best_key != "scheme2_am_hotcold":
+            adjust_notes.append(
+                f"上期表现最好：{SCHEME_LABELS.get(best_key, best_key)} "
+                f"({review_block['scheme_details'][best_key]['hit_rate']})"
+            )
         weights = save_weights(weights)
         db.save_review(
             period=latest["period"],
             draw_numbers=latest["numbers"],
-            pred_numbers=pred_nums,
+            pred_numbers=review_block["pred_numbers"],
             hits=review_block["hits"],
             fail_reasons={
                 "reasons": review_block["fail_reasons"],
                 "primary": review_block["primary_reasons"],
+                "schemes": {
+                    k: {"hit_rate": v["hit_rate"], "hits": v["hits"]}
+                    for k, v in review_block.get("scheme_details", {}).items()
+                },
             },
             created_at=_now(),
         )
@@ -821,7 +846,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
     long_term = analyze_long_term(draws)
     next_period = int(latest["period"]) + 1
 
-    # 主推荐：方案2（反马尔可夫+热冷平衡）作为对外核心之一，同时保留综合组
+    # 主推荐：方案2（选10）
     primary = groups["scheme2_am_hotcold"]
 
     pred_payload = {
@@ -830,7 +855,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         "created_at": _now(),
         "numbers": primary,
         "core": groups["core"],
-        "groups": {k: v for k, v in groups.items()},
+        "groups": {k: v for k, v in groups.items() if k != "core"},
         "weights": weights,
     }
     save_last_prediction(pred_payload)
@@ -886,9 +911,20 @@ def render_report(
     a(f"开奖期号：{latest['period']}（{latest['date']}）")
     a(f"开奖号码：{fmt_nums(latest['numbers'])}")
     if review:
-        a(f"预测号码：{fmt_nums(review['pred_numbers'])}")
+        a(f"主预测（方案2选10）：{fmt_nums(review['pred_numbers'])}")
         a(f"命中：{fmt_nums(review['hits']) if review['hits'] else '无'}")
         a(f"命中率：{review['hit_rate']}")
+        details = review.get("scheme_details") or {}
+        if details:
+            a("各组命中：")
+            for key in list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5):
+                if key not in details:
+                    continue
+                d = details[key]
+                a(
+                    f"  {SCHEME_LABELS.get(key, key)}：{d['hit_rate']} "
+                    f"| 命中 {fmt_nums(d['hits']) if d['hits'] else '无'}"
+                )
         if review.get("note"):
             a(f"说明：{review['note']}")
         a("失败原因：")
@@ -943,17 +979,18 @@ def render_report(
     a(f"目标期号：{next_period}")
     a(f"基于历史：近 {analysis['periods']} 期（最新开奖 {analysis['latest_period']}）")
     a("")
+    a("【选10 · 三组算法】")
     a(f"方案1 反马尔可夫链：{fmt_nums(groups['scheme1_anti_markov'])}")
     a(f"方案2 反马尔可夫链+热冷平衡：{fmt_nums(groups['scheme2_am_hotcold'])}")
     a(f"方案3 反马尔可夫链+冷号回补：{fmt_nums(groups['scheme3_am_cold'])}")
     a("")
-    a("【四组预测】")
-    a(f"第一组 综合模型推荐：{fmt_nums(groups['group1_ensemble'])}")
-    a(f"第二组 冷号回补模型：{fmt_nums(groups['group2_cold'])}")
-    a(f"第三组 热号延续模型：{fmt_nums(groups['group3_hot'])}")
-    a(f"第四组 机器随机优化：{fmt_nums(groups['group4_random_opt'])}")
+    a("【选5 · 同型三组算法】")
+    a(f"方案1 反马尔可夫链：{fmt_nums(groups['scheme1_anti_markov_5'])}")
+    a(f"方案2 反马尔可夫链+热冷平衡：{fmt_nums(groups['scheme2_am_hotcold_5'])}")
+    a(f"方案3 反马尔可夫链+冷号回补：{fmt_nums(groups['scheme3_am_cold_5'])}")
     a("")
-    a(f"推荐10个核心号码：{fmt_nums(sorted(analysis['core10']))}")
+    a(f"推荐10个核心号码：{fmt_nums(groups['scheme2_am_hotcold'])}")
+    a(f"推荐5个核心号码：{fmt_nums(groups['scheme2_am_hotcold_5'])}")
     a("")
     a("━━━━━━━━━━━━")
     a("")
