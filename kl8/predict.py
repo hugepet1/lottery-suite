@@ -772,7 +772,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
     review_block = None
     adjust_notes: List[str] = ["首次运行或无上一期预测，保持默认/当前权重"]
 
-    # 复盘：若有针对 latest.period 的预测
+    # 复盘：仅当存在「针对最新已开奖期」的预测时才对比
     if last_pred and int(last_pred.get("target_period", -1)) == int(latest["period"]):
         pred_nums = last_pred.get("numbers") or last_pred.get("core") or []
         review_block = review_prediction(
@@ -791,17 +791,16 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
             },
             created_at=_now(),
         )
+    elif last_pred and int(last_pred.get("target_period", -1)) > int(latest["period"]):
+        adjust_notes = [
+            f"已有针对第 {last_pred.get('target_period')} 期的预测，"
+            "等待该期开奖后再复盘；本次刷新分析与方案"
+        ]
     elif last_pred:
-        # 预测期号不匹配：仍展示最近预测与最新开奖的对比供参考
-        pred_nums = last_pred.get("numbers") or last_pred.get("core") or []
-        review_block = review_prediction(
-            latest["numbers"], pred_nums, draws[:-1]
-        )
-        review_block["note"] = (
+        adjust_notes = [
             f"上一份预测目标期为 {last_pred.get('target_period')}，"
-            f"与最新开奖期 {latest['period']} 不一致，仅作参考对比"
-        )
-        adjust_notes = ["预测期号不一致，权重暂不按本次复盘强制调整"]
+            f"最新开奖为 {latest['period']}，跳过无效复盘"
+        ]
 
     # 每累计 50 期回测并优化
     bt = None
