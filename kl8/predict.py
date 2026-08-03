@@ -440,6 +440,121 @@ def predict_groups(
 
 
 # ---------------------------------------------------------------------------
+# 金胆：单号最高置信预测
+# ---------------------------------------------------------------------------
+
+def predict_jin_dan(
+    draws: Sequence[Dict],
+    groups: Optional[Dict[str, List[int]]] = None,
+    weights: Optional[Dict[str, float]] = None,
+    seed: int = 2026,
+) -> Dict:
+    """
+    金胆 = 下一期最可能开出的 1 个号码。
+    综合：三组方案共识、综合评分、反马尔可夫、遗漏适中、非上期刚开。
+    另给银胆/铜胆（备选）。
+    """
+    w = _norm_weights(weights or load_weights())
+    scores = score_numbers(draws, w, seed=seed)
+    am = anti_markov_scores(draws)
+    gaps = current_gaps(draws)
+    groups = groups or predict_groups(draws, w, seed=seed)
+    last_set = set(draws[-1]["numbers"]) if draws else set()
+
+    # 方案共识：出现在选10/选5中的次数加权
+    consensus = Counter()
+    for key, nums in groups.items():
+        if key == "core":
+            continue
+        weight = 1.5 if key.endswith("_5") else 1.0
+        for i, n in enumerate(sorted(nums, key=lambda x: -scores[x]["total"])):
+            # 越靠前共识分越高
+            consensus[n] += weight * (1.0 + 0.08 * (len(nums) - i))
+
+    max_c = max(consensus.values()) if consensus else 1.0
+    jin_scores: Dict[int, float] = {}
+    for n in range(1, POOL + 1):
+        g = gaps[n]
+        # 遗漏适中（约 2~8 期）加分
+        gap_fit = math.exp(-((g - 4.5) ** 2) / 18.0)
+        cons = consensus.get(n, 0) / max_c
+        s = (
+            0.34 * scores[n]["total"]
+            + 0.28 * am[n]
+            + 0.22 * cons * 100.0
+            + 0.16 * gap_fit * 100.0
+        )
+        if n in last_set:
+            s *= 0.78  # 刚开出略降（反续开）
+        if g >= 16:
+            s *= 0.85  # 长期异常
+        if g == 0 and n in last_set:
+            s *= 0.92
+        jin_scores[n] = s
+
+    ranked = sorted(jin_scores.keys(), key=lambda x: jin_scores[x], reverse=True)
+    gold = ranked[0]
+    silver = ranked[1]
+    bronze = ranked[2]
+    # 置信度：相对领先幅度（研究评分，不是开出概率；随机基线约25%）
+    top = jin_scores[gold]
+    second = jin_scores[silver]
+    lead = max(0.0, top - second)
+    conf = min(78.0, max(40.0, 48.0 + lead * 1.8 + min(8.0, consensus.get(gold, 0))))
+
+    reasons = []
+    if consensus.get(gold, 0) >= max_c * 0.7:
+        reasons.append("多方案共识靠前")
+    if 2 <= gaps[gold] <= 8:
+        reasons.append(f"遗漏适中（{gaps[gold]}期）")
+    if am[gold] >= 70:
+        reasons.append("反马尔可夫评分高")
+    if scores[gold]["total"] >= 60:
+        reasons.append("综合评分靠前")
+    if not reasons:
+        reasons.append("相对分最高")
+
+    return {
+        "jin_dan": gold,
+        "yin_dan": silver,
+        "tong_dan": bronze,
+        "confidence": round(conf, 1),
+        "score": round(jin_scores[gold], 2),
+        "reasons": reasons,
+        "top5": [(n, round(jin_scores[n], 2)) for n in ranked[:5]],
+        "gap": gaps[gold],
+    }
+
+
+def backtest_jin_dan(
+    draws: Sequence[Dict],
+    window: int = 50,
+    weights: Optional[Dict[str, float]] = None,
+) -> Dict:
+    """金胆命中率回测（随机期望约 20/80=25%）。"""
+    if len(draws) < window + 15:
+        window = max(10, len(draws) - 15)
+    w = _norm_weights(weights or load_weights())
+    hits = 0
+    total = 0
+    start = len(draws) - window
+    for i in range(start, len(draws)):
+        hist = draws[:i]
+        actual = set(draws[i]["numbers"])
+        jd = predict_jin_dan(hist, weights=w, seed=2000 + i)
+        total += 1
+        if jd["jin_dan"] in actual:
+            hits += 1
+    rate = hits / total if total else 0.0
+    return {
+        "window_size": total,
+        "hits": hits,
+        "hit_rate": round(rate, 3),
+        "expected_random": round(DRAW_N / POOL, 3),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 长期守号
 # ---------------------------------------------------------------------------
 
@@ -788,8 +903,38 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         review_block = review_all_schemes(
             latest["numbers"], prev_groups, draws[:-1], primary_key="scheme2_am_hotcold"
         )
-        # 若方案1更好，主复盘仍用方案2调权，但注明各组表现
+        # 金胆复盘
+        prev_jd = last_pred.get("jin_dan")
+        draw_set = set(int(x) for x in latest["numbers"])
+        if prev_jd is not None:
+            if isinstance(prev_jd, dict):
+                jd_num = int(prev_jd.get("jin_dan", 0))
+                yin = prev_jd.get("yin_dan", last_pred.get("yin_dan"))
+                tong = prev_jd.get("tong_dan", last_pred.get("tong_dan"))
+            else:
+                jd_num = int(prev_jd)
+                yin = last_pred.get("yin_dan")
+                tong = last_pred.get("tong_dan")
+            review_block["jin_dan"] = {
+                "number": jd_num,
+                "hit": jd_num in draw_set,
+                "yin_dan": int(yin) if yin is not None else None,
+                "tong_dan": int(tong) if tong is not None else None,
+                "yin_hit": int(yin) in draw_set if yin is not None else False,
+                "tong_hit": int(tong) in draw_set if tong is not None else False,
+            }
+        else:
+            review_block["jin_dan"] = None
+
         weights, adjust_notes = adjust_weights_from_review(weights, review_block)
+        if review_block.get("jin_dan"):
+            jd = review_block["jin_dan"]
+            note = f"上期金胆 {jd['number']:02d}：{'命中' if jd['hit'] else '未中'}"
+            if jd.get("yin_dan") is not None:
+                note += f"；银胆 {jd['yin_dan']:02d}：{'命中' if jd['yin_hit'] else '未中'}"
+            if jd.get("tong_dan") is not None:
+                note += f"；铜胆 {jd['tong_dan']:02d}：{'命中' if jd['tong_hit'] else '未中'}"
+            adjust_notes.append(note)
         best_key = max(
             (k for k in SCHEME_KEYS_10 if k in review_block.get("scheme_details", {})),
             key=lambda k: review_block["scheme_details"][k]["hit_count"],
@@ -813,6 +958,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
                     k: {"hit_rate": v["hit_rate"], "hits": v["hits"]}
                     for k, v in review_block.get("scheme_details", {}).items()
                 },
+                "jin_dan": review_block.get("jin_dan"),
             },
             created_at=_now(),
         )
@@ -843,6 +989,8 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
 
     analysis = build_analysis(draws, weights)
     groups = predict_groups(draws, weights)
+    jin_dan = predict_jin_dan(draws, groups=groups, weights=weights)
+    jd_bt = backtest_jin_dan(draws, window=min(50, max(10, len(draws) - 15)), weights=weights)
     long_term = analyze_long_term(draws)
     next_period = int(latest["period"]) + 1
 
@@ -855,12 +1003,24 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         "created_at": _now(),
         "numbers": primary,
         "core": groups["core"],
+        "jin_dan": jin_dan["jin_dan"],
+        "yin_dan": jin_dan["yin_dan"],
+        "tong_dan": jin_dan["tong_dan"],
+        "jin_dan_detail": jin_dan,
         "groups": {k: v for k, v in groups.items() if k != "core"},
         "weights": weights,
     }
     save_last_prediction(pred_payload)
     for name, nums in groups.items():
         db.save_prediction(next_period, name, nums, weights, _now())
+    db.save_prediction(next_period, "jin_dan", [jin_dan["jin_dan"]], weights, _now())
+    db.save_prediction(
+        next_period,
+        "dan_trio",
+        [jin_dan["jin_dan"], jin_dan["yin_dan"], jin_dan["tong_dan"]],
+        weights,
+        _now(),
+    )
 
     report = render_report(
         draws=draws,
@@ -872,6 +1032,8 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         review=review_block,
         backtest_result=bt,
         next_period=next_period,
+        jin_dan=jin_dan,
+        jin_dan_backtest=jd_bt,
     )
     REPORT_PATH.write_text(report, encoding="utf-8")
 
@@ -879,6 +1041,8 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         "draws": draws,
         "analysis": analysis,
         "groups": groups,
+        "jin_dan": jin_dan,
+        "jin_dan_backtest": jd_bt,
         "long_term": long_term,
         "weights": weights,
         "review": review_block,
@@ -899,6 +1063,8 @@ def render_report(
     review: Optional[Dict],
     backtest_result: Optional[Dict],
     next_period: int,
+    jin_dan: Optional[Dict] = None,
+    jin_dan_backtest: Optional[Dict] = None,
 ) -> str:
     latest = draws[-1]
     lines: List[str] = []
@@ -925,6 +1091,21 @@ def render_report(
                     f"  {SCHEME_LABELS.get(key, key)}：{d['hit_rate']} "
                     f"| 命中 {fmt_nums(d['hits']) if d['hits'] else '无'}"
                 )
+        jd_rev = review.get("jin_dan")
+        if jd_rev:
+            a(
+                f"金胆复盘：{jd_rev['number']:02d} → "
+                f"{'命中' if jd_rev['hit'] else '未中'}"
+            )
+            if jd_rev.get("yin_dan") is not None:
+                a(
+                    f"银胆复盘：{int(jd_rev['yin_dan']):02d} → "
+                    f"{'命中' if jd_rev.get('yin_hit') else '未中'}；"
+                    f"铜胆：{int(jd_rev['tong_dan']):02d} → "
+                    f"{'命中' if jd_rev.get('tong_hit') else '未中'}"
+                )
+        else:
+            a("金胆复盘：上期未启用金胆预测")
         if review.get("note"):
             a(f"说明：{review['note']}")
         a("失败原因：")
@@ -957,6 +1138,12 @@ def render_report(
         a(f"  10中10次数：{backtest_result['hit10']}")
         a(f"  9中10次数：{backtest_result['hit9']}")
         a(f"  8中10次数：{backtest_result['hit8']}")
+    if jin_dan_backtest:
+        a(
+            f"金胆回测（近{jin_dan_backtest['window_size']}期，随机期望约 "
+            f"{jin_dan_backtest['expected_random']}）："
+            f"命中 {jin_dan_backtest['hits']} 次，命中率 {jin_dan_backtest['hit_rate']}"
+        )
     a("")
     a("━━━━━━━━━━━━")
     a("")
@@ -979,6 +1166,20 @@ def render_report(
     a(f"目标期号：{next_period}")
     a(f"基于历史：近 {analysis['periods']} 期（最新开奖 {analysis['latest_period']}）")
     a("")
+    if jin_dan:
+        a("【金胆】")
+        a(
+            f"金胆：{jin_dan['jin_dan']:02d}"
+            f"（研究置信 {jin_dan['confidence']}/100，非开出概率；"
+            f"单号随机约25%）"
+        )
+        a(f"银胆：{jin_dan['yin_dan']:02d}｜铜胆：{jin_dan['tong_dan']:02d}")
+        a(f"推荐理由：{'；'.join(jin_dan['reasons'])}")
+        a(
+            "金胆候选TOP5："
+            + " ".join(f"{n:02d}({s})" for n, s in jin_dan["top5"])
+        )
+        a("")
     a("【选10 · 三组算法】")
     a(f"方案1 反马尔可夫链：{fmt_nums(groups['scheme1_anti_markov'])}")
     a(f"方案2 反马尔可夫链+热冷平衡：{fmt_nums(groups['scheme2_am_hotcold'])}")
