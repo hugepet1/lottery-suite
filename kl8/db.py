@@ -118,8 +118,16 @@ def _parse_nums(row: Sequence[str]) -> Optional[List[int]]:
     return sorted(nums)
 
 
-def import_csv(csv_path: Path = CSV_PATH, db_path: Path = DB_PATH) -> int:
-    """导入 CSV，返回写入/更新条数。"""
+def import_csv(
+    csv_path: Path = CSV_PATH,
+    db_path: Path = DB_PATH,
+    *,
+    max_period: Optional[int] = None,
+) -> int:
+    """导入 CSV，返回写入/更新条数。
+
+    max_period: 若指定，仅保留 period <= max_period 的开奖（用于截断后期数据）。
+    """
     conn = init_db(connect(db_path))
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV 不存在: {csv_path}")
@@ -141,6 +149,8 @@ def import_csv(csv_path: Path = CSV_PATH, db_path: Path = DB_PATH) -> int:
         if not row or not row[0].strip().isdigit():
             continue
         period = int(row[0].strip())
+        if max_period is not None and period > max_period:
+            continue
         date = (row[1] if len(row) > 1 else "").strip()
         nums = _parse_nums(row)
         if nums is None:
@@ -366,8 +376,15 @@ def delete_database(db_path: Path = DB_PATH) -> bool:
     return existed
 
 
-def _export_runtime_state(db_path: Path = DB_PATH) -> Dict:
-    """导出权重与复盘，供删库重建后恢复。"""
+def _export_runtime_state(
+    db_path: Path = DB_PATH,
+    *,
+    max_period: Optional[int] = None,
+) -> Dict:
+    """导出权重与复盘，供删库重建后恢复。
+
+    max_period: 若指定，仅导出 period <= max_period 的复盘记录。
+    """
     state: Dict = {"weights": None, "reviews": [], "backtests": []}
     if not db_path.exists():
         return state
@@ -383,13 +400,23 @@ def _export_runtime_state(db_path: Path = DB_PATH) -> Dict:
             }
         # 表可能不存在于损坏库
         try:
-            reviews = conn.execute(
-                """
-                SELECT period, draw_numbers_json, pred_numbers_json, hits_json,
-                       hit_count, fail_reasons_json, created_at
-                FROM reviews ORDER BY id ASC
-                """
-            ).fetchall()
+            if max_period is not None:
+                reviews = conn.execute(
+                    """
+                    SELECT period, draw_numbers_json, pred_numbers_json, hits_json,
+                           hit_count, fail_reasons_json, created_at
+                    FROM reviews WHERE period <= ? ORDER BY id ASC
+                    """,
+                    [max_period],
+                ).fetchall()
+            else:
+                reviews = conn.execute(
+                    """
+                    SELECT period, draw_numbers_json, pred_numbers_json, hits_json,
+                           hit_count, fail_reasons_json, created_at
+                    FROM reviews ORDER BY id ASC
+                    """
+                ).fetchall()
             state["reviews"] = [dict(r) for r in reviews]
         except sqlite3.Error:
             pass
@@ -438,16 +465,41 @@ def _restore_runtime_state(state: Dict, db_path: Path = DB_PATH) -> None:
         conn.close()
 
 
-def rebuild_from_csv(csv_path: Path = CSV_PATH, db_path: Path = DB_PATH) -> int:
-    """删除旧库后从 CSV 重建；保留权重与复盘记录。"""
+def purge_draws_after(max_period: int, db_path: Path = DB_PATH) -> int:
+    """删除 period > max_period 的开奖及相关预测/复盘记录。"""
+    if not db_path.exists():
+        return 0
+    conn = init_db(connect(db_path))
+    try:
+        cur = conn.execute("DELETE FROM draws WHERE period > ?", [max_period])
+        deleted = cur.rowcount
+        conn.execute("DELETE FROM predictions WHERE target_period > ?", [max_period + 1])
+        conn.execute("DELETE FROM reviews WHERE period > ?", [max_period])
+        conn.commit()
+        return int(deleted or 0)
+    finally:
+        conn.close()
+
+
+def rebuild_from_csv(
+    csv_path: Path = CSV_PATH,
+    db_path: Path = DB_PATH,
+    *,
+    max_period: Optional[int] = None,
+) -> int:
+    """删除旧库后从 CSV 重建；保留权重与（截断范围内的）复盘记录。"""
     ensure_dir()
-    state = _export_runtime_state(db_path)
+    state = _export_runtime_state(db_path, max_period=max_period)
     delete_database(db_path)
-    n = import_csv(csv_path, db_path)
+    n = import_csv(csv_path, db_path, max_period=max_period)
     _restore_runtime_state(state, db_path)
     return n
 
 
-def bootstrap_from_csv(csv_path: Path = CSV_PATH) -> int:
+def bootstrap_from_csv(
+    csv_path: Path = CSV_PATH,
+    *,
+    max_period: Optional[int] = None,
+) -> int:
     ensure_dir()
-    return import_csv(csv_path)
+    return import_csv(csv_path, max_period=max_period)

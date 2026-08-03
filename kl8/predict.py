@@ -148,15 +148,39 @@ def ensure_database(
     csv_path: Optional[Path] = None,
     *,
     rebuild: bool = False,
+    max_period: Optional[int] = None,
 ) -> List[Dict]:
-    """建立/刷新数据库，并同步 history.json。rebuild=True 时删除旧库后重建。"""
+    """建立/刷新数据库，并同步 history.json。
+
+    rebuild=True 时删除旧库后重建。
+    max_period 若指定，仅保留 period <= max_period 的开奖（截断后期数据）。
+    """
     db.ensure_dir()
     path = csv_path or db.CSV_PATH
     if rebuild:
-        db.rebuild_from_csv(path)
+        db.rebuild_from_csv(path, max_period=max_period)
     elif path.exists():
-        db.import_csv(path)
+        db.import_csv(path, max_period=max_period)
+        if max_period is not None:
+            db.purge_draws_after(max_period)
+    elif max_period is not None and db.DB_PATH.exists():
+        db.purge_draws_after(max_period)
+
     draws = db.load_draws()
+    if max_period is not None:
+        draws = [d for d in draws if int(d["period"]) <= max_period]
+
+    # 截断后若本地预测指向更后期，清空以免错误复盘
+    if max_period is not None and LAST_PRED_PATH.exists():
+        try:
+            prev = json.loads(LAST_PRED_PATH.read_text(encoding="utf-8"))
+            based = int(prev.get("based_on_period") or 0)
+            target = int(prev.get("target_period") or 0)
+            if based > max_period or target > max_period + 1:
+                LAST_PRED_PATH.unlink(missing_ok=True)
+        except (json.JSONDecodeError, TypeError, ValueError, OSError):
+            LAST_PRED_PATH.unlink(missing_ok=True)
+
     if draws:
         payload = [
             {
@@ -1528,8 +1552,13 @@ def save_last_prediction(payload: Dict) -> None:
     )
 
 
-def run_pipeline(csv_path: Optional[Path] = None, *, rebuild: bool = False) -> Dict:
-    draws = ensure_database(csv_path, rebuild=rebuild)
+def run_pipeline(
+    csv_path: Optional[Path] = None,
+    *,
+    rebuild: bool = False,
+    max_period: Optional[int] = None,
+) -> Dict:
+    draws = ensure_database(csv_path, rebuild=rebuild, max_period=max_period)
     if len(draws) < 20:
         raise RuntimeError(f"历史数据不足（{len(draws)} 期），至少需要约 20 期。")
 
@@ -1540,6 +1569,11 @@ def run_pipeline(csv_path: Optional[Path] = None, *, rebuild: bool = False) -> D
     adjust_notes: List[str] = ["首次运行或无上一期预测，保持默认/当前权重"]
     if rebuild:
         adjust_notes = ["已删除旧版数据库并从 CSV 重建，权重与复盘记录已迁移保留"]
+    if max_period is not None:
+        adjust_notes.append(
+            f"数据库已截断：仅保留至第 {max_period} 期及以前"
+            f"（最新开奖 {latest['period']}，共 {len(draws)} 期）"
+        )
 
     # 复盘：仅当存在「针对最新已开奖期」的预测时才对比
     if last_pred and int(last_pred.get("target_period", -1)) == int(latest["period"]):

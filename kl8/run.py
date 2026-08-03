@@ -35,18 +35,34 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="删除旧版数据库后从 CSV 重建，再预测",
     )
+    p.add_argument(
+        "--max-period",
+        type=int,
+        default=None,
+        help="仅保留该期号及以前的开奖（例如 2026187）",
+    )
     args = p.parse_args(argv)
 
     if args.import_only:
         if args.rebuild:
-            n = db.rebuild_from_csv(args.csv or db.CSV_PATH)
+            n = db.rebuild_from_csv(
+                args.csv or db.CSV_PATH, max_period=args.max_period
+            )
             print(f"已删除旧库并重建，导入 {n} 期到 {db.DB_PATH}")
         else:
-            n = db.bootstrap_from_csv(args.csv or db.CSV_PATH)
+            n = db.bootstrap_from_csv(
+                args.csv or db.CSV_PATH, max_period=args.max_period
+            )
+            if args.max_period is not None:
+                db.purge_draws_after(args.max_period)
             print(f"已导入 {n} 期到 {db.DB_PATH}")
+        if args.max_period is not None:
+            print(f"[OK] 截断期号: <= {args.max_period}")
         return 0
 
-    result = run_pipeline(args.csv, rebuild=args.rebuild)
+    result = run_pipeline(
+        args.csv, rebuild=args.rebuild, max_period=args.max_period
+    )
     print(result["report"])
     print(f"\n[OK] 报告已写入: {result['report_path']}")
     print(f"[OK] 数据库: {db.DB_PATH}")
