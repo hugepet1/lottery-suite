@@ -31,6 +31,7 @@ SCHEME_KEYS_10 = (
     "scheme1_ensemble",
     "scheme2_gap_rhythm",
     "scheme3_cooc_hot",
+    "scheme4_pattern_hedge",
 )
 # 历史方案键（复盘兼容）
 SCHEME_KEYS_LEGACY = (
@@ -42,7 +43,7 @@ SCHEME_KEYS_LEGACY = (
     "scheme2_am_hotcold_5",
     "scheme3_am_cold_5",
     "scheme3_markov_5",
-    "duplex5_6",
+    "duplex10_11",
 )
 SCHEME_KEYS_5 = (
     "scheme1_anti_markov_5",
@@ -51,13 +52,14 @@ SCHEME_KEYS_5 = (
     "scheme3_markov_5",
 )
 SCHEME_KEYS_DUPLEX = (
-    "duplex10_11",
     "duplex5_6",
+    "duplex10_11",  # 旧
 )
 SCHEME_LABELS = {
     "scheme1_ensemble": "方案1 多因子集成+技巧（选10）",
     "scheme2_gap_rhythm": "方案2 遗漏节奏/空位口诀（选10）",
     "scheme3_cooc_hot": "方案3 共现热/重号对称封口（选10）",
+    "scheme4_pattern_hedge": "方案4 形态均衡对冲（选10）",
     "scheme1_anti_markov": "方案1 反马尔可夫链（选10·旧）",
     "scheme2_am_hotcold": "方案2 反马尔可夫+冷热（选10·旧）",
     "scheme3_markov": "方案3 马尔可夫链（选10·旧）",
@@ -66,8 +68,8 @@ SCHEME_LABELS = {
     "scheme2_am_hotcold_5": "方案2 选5·旧",
     "scheme3_am_cold_5": "方案3 选5·旧",
     "scheme3_markov_5": "方案3 马尔可夫选5·旧",
-    "duplex5_6": "三组整合选5复式6",
-    "duplex10_11": "三组混合选10复式11",
+    "duplex5_6": "选5复式6",
+    "duplex10_11": "选10复式11（旧）",
 }
 
 DEFAULT_WEIGHTS = {
@@ -825,19 +827,56 @@ def predict_groups(
     if overlap13 >= 6:
         scheme3 = _diversify(scheme3[:6], ranked3, set(scheme1) | set(scheme2))
 
-    duplex10 = _merge_by_votes(
-        [scheme1, scheme2, scheme3],
-        scores,
-        PICK_DUPLEX_10,
-        filler=ranked1,
-        guarantee_each=2,
-    )
-    # 选5复式6：各组先取 Top5，再投票整合为 6 码（C(6,5)=6注）
+    # ---- 方案4：形态均衡对冲（替代原复式11）----
+    # 在高分池中做形态约束抽样，刻意降低与前三组重叠，补齐奇偶/大小/区间
+    avoid123 = set(scheme1) | set(scheme2) | set(scheme3)
+    hedge = {
+        n: (
+            0.30 * scores[n]["total"]
+            + 0.20 * scores[n]["oddeven_size"]
+            + 0.18 * scores[n]["zone"]
+            + 0.14 * folk_s[n]
+            + 0.10 * rhythm[n]
+            + 0.08 * am[n]
+        )
+        for n in range(1, POOL + 1)
+    }
+    for n in hedge:
+        if n in avoid123:
+            hedge[n] *= 0.72  # 对冲：降低与前三组重复
+        if n in last:
+            hedge[n] *= 0.88
+    ranked4 = sorted(hedge.keys(), key=lambda n: hedge[n], reverse=True)
+    # 蒙特卡洛形态优选
+    rng = random.Random(seed + 19)
+    pool4 = ranked4[:36]
+    best4 = None
+    best4_s = -1e9
+    for _ in range(600):
+        pick = sorted(rng.sample(pool4, PICK_N))
+        odd = sum(1 for x in pick if x % 2 == 1)
+        big = sum(1 for x in pick if is_big(x))
+        zones = len({zone_of(x) for x in pick})
+        cons = consecutive_pairs(pick)
+        overlap = len(set(pick) & avoid123)
+        s = sum(hedge[n] for n in pick)
+        s += (5 - abs(odd - 5)) * 6
+        s += (5 - abs(big - 5)) * 6
+        s += zones * 5
+        s += (2 - abs(cons - 2)) * 3
+        s -= overlap * 4  # 重叠惩罚
+        if s > best4_s:
+            best4_s = s
+            best4 = pick
+    scheme4 = best4 or _balance_pick(ranked4, scores, PICK_N, max_zone=3)
+
+    # 选5复式6：四组各取 Top5，投票整合为 6 码（C(6,5)=6注）
     pick5_1 = _balance_pick(ranked1, scores, PICK_N5, max_zone=2)
     pick5_2 = _balance_pick(ranked2, scores, PICK_N5, max_zone=2)
     pick5_3 = _balance_pick(ranked3, scores, PICK_N5, max_zone=2)
+    pick5_4 = _balance_pick(ranked4, scores, PICK_N5, max_zone=2)
     duplex5 = _merge_by_votes(
-        [pick5_1, pick5_2, pick5_3],
+        [pick5_1, pick5_2, pick5_3, pick5_4],
         scores,
         PICK_DUPLEX_5,
         filler=ranked1,
@@ -849,8 +888,8 @@ def predict_groups(
         "scheme1_ensemble": scheme1,
         "scheme2_gap_rhythm": scheme2,
         "scheme3_cooc_hot": scheme3,
+        "scheme4_pattern_hedge": scheme4,
         "duplex5_6": duplex5,
-        "duplex10_11": duplex10,
         "folk_tips": folk["detail"],
     }
 
@@ -1751,27 +1790,22 @@ def render_report(
         a(f"对称号：{fmt_nums(folk_tips.get('dui_cheng') or [])}")
         a("（斜连号已并入评分；技巧只加分，不单独包中）")
         a("")
-    a("【选10 · 三组自由算法】")
+    a("【选10 · 四组预测】")
     a(f"方案1 多因子集成+技巧：{fmt_nums(groups['scheme1_ensemble'])}")
     a(f"方案2 遗漏节奏/空位口诀：{fmt_nums(groups['scheme2_gap_rhythm'])}")
     a(f"方案3 共现热/重号对称封口：{fmt_nums(groups['scheme3_cooc_hot'])}")
+    a(f"方案4 形态均衡对冲：{fmt_nums(groups['scheme4_pattern_hedge'])}")
     a("")
-    a("【复式整合】")
     if groups.get("duplex5_6"):
+        a("【复式】")
         a(
-            f"选5复式6（三组Top5整合，C(6,5)=6注）："
+            f"选5复式6（四组Top5整合，C(6,5)=6注）："
             f"{fmt_nums(groups['duplex5_6'])}"
         )
-    a(
-        f"选10复式11（三组混合+每组保送2码，C(11,10)=11注）："
-        f"{fmt_nums(groups['duplex10_11'])}"
-    )
-    a("说明：已融合民间技巧参考；复式优先覆盖三组差异化号码。")
-    a("")
+        a("")
     a(f"推荐10个核心号码：{fmt_nums(groups['scheme1_ensemble'])}")
     if groups.get("duplex5_6"):
         a(f"推荐选5复式6：{fmt_nums(groups['duplex5_6'])}")
-    a(f"推荐选10复式11：{fmt_nums(groups['duplex10_11'])}")
     a("")
     a("━━━━━━━━━━━━")
     a("")
