@@ -30,27 +30,38 @@ LONG_TERM = (2, 11, 14, 27, 39, 49, 54, 62, 69, 75)
 SCHEME_KEYS_10 = (
     "scheme1_anti_markov",
     "scheme2_am_hotcold",
-    "scheme3_am_cold",
+    "scheme3_markov",
 )
-# 历史三组选5（复盘兼容）+ 新整合复式
+# 历史方案键（复盘兼容）
+SCHEME_KEYS_LEGACY = (
+    "scheme3_am_cold",
+    "scheme1_anti_markov_5",
+    "scheme2_am_hotcold_5",
+    "scheme3_am_cold_5",
+    "scheme3_markov_5",
+    "duplex5_6",
+)
 SCHEME_KEYS_5 = (
     "scheme1_anti_markov_5",
     "scheme2_am_hotcold_5",
     "scheme3_am_cold_5",
+    "scheme3_markov_5",
 )
 SCHEME_KEYS_DUPLEX = (
-    "duplex5_6",
     "duplex10_11",
+    "duplex5_6",
 )
 SCHEME_LABELS = {
     "scheme1_anti_markov": "方案1 反马尔可夫链（选10）",
-    "scheme2_am_hotcold": "方案2 反马尔可夫+热冷平衡（选10）",
-    "scheme3_am_cold": "方案3 反马尔可夫+冷号回补（选10）",
-    "scheme1_anti_markov_5": "方案1 反马尔可夫链（选5）",
-    "scheme2_am_hotcold_5": "方案2 反马尔可夫+热冷平衡（选5）",
-    "scheme3_am_cold_5": "方案3 反马尔可夫+冷号回补（选5）",
-    "duplex5_6": "整合选5复式6",
-    "duplex10_11": "混合选10复式11",
+    "scheme2_am_hotcold": "方案2 反马尔可夫链+冷热平衡（选10）",
+    "scheme3_markov": "方案3 马尔可夫链（选10）",
+    "scheme3_am_cold": "方案3 反马尔可夫+冷号回补（选10·旧）",
+    "scheme1_anti_markov_5": "方案1 反马尔可夫链（选5·旧）",
+    "scheme2_am_hotcold_5": "方案2 反马尔可夫+冷热平衡（选5·旧）",
+    "scheme3_am_cold_5": "方案3 冷号回补（选5·旧）",
+    "scheme3_markov_5": "方案3 马尔可夫链（选5）",
+    "duplex5_6": "整合选5复式6（旧）",
+    "duplex10_11": "三组混合选10复式11",
 }
 
 DEFAULT_WEIGHTS = {
@@ -196,6 +207,19 @@ def build_transition(draws: Sequence[Dict]) -> Dict[int, Counter]:
     return trans
 
 
+def _follow_strength(draws: Sequence[Dict]) -> Counter:
+    """上一期号码集合 → 各候选号的历史跟随强度。"""
+    follow: Counter = Counter()
+    if len(draws) < 2:
+        return follow
+    trans = build_transition(draws)
+    last = set(draws[-1]["numbers"])
+    for i in last:
+        for j, c in trans[i].items():
+            follow[j] += c
+    return follow
+
+
 def anti_markov_scores(draws: Sequence[Dict]) -> Dict[int, float]:
     """
     反马尔可夫评分：对「上一期号码」的高转移续开给予惩罚，
@@ -203,17 +227,9 @@ def anti_markov_scores(draws: Sequence[Dict]) -> Dict[int, float]:
     """
     if len(draws) < 2:
         return {n: 50.0 for n in range(1, POOL + 1)}
-    trans = build_transition(draws)
+    follow = _follow_strength(draws)
     last = set(draws[-1]["numbers"])
-    # 对每个候选 j，累加其从 last 集合被“跟随”的强度
-    follow = Counter()
-    total_from = Counter()
-    for i in last:
-        for j, c in trans[i].items():
-            follow[j] += c
-            total_from[i] += c
     max_f = max(follow.values()) if follow else 1
-    # 上一期已开出的号码略降权（反续开）
     scores = {}
     for n in range(1, POOL + 1):
         f = follow.get(n, 0) / max_f
@@ -222,6 +238,29 @@ def anti_markov_scores(draws: Sequence[Dict]) -> Dict[int, float]:
         if n in last:
             base *= 0.72
         scores[n] = base
+    return scores
+
+
+def markov_scores(draws: Sequence[Dict]) -> Dict[int, float]:
+    """
+    正马尔可夫评分：优先历史上常跟随上一期开出集合出现的号码（续开/共现转移）。
+    """
+    if len(draws) < 2:
+        return {n: 50.0 for n in range(1, POOL + 1)}
+    follow = _follow_strength(draws)
+    last = set(draws[-1]["numbers"])
+    freq_20 = appearance_counts(draws, 20)
+    max_f = max(follow.values()) if follow else 1
+    max_h = max(freq_20.values()) if freq_20 else 1
+    scores = {}
+    for n in range(1, POOL + 1):
+        f = follow.get(n, 0) / max_f
+        # 高跟随 => 高分；辅以近20期热度平滑（避免纯稀疏转移）
+        hot = freq_20.get(n, 0) / max_h
+        base = 100.0 * (0.75 * f + 0.25 * hot)
+        if n in last:
+            base = 0.55 * base + 45.0  # 刚开出仍有一定续开权重
+        scores[n] = max(0.0, min(100.0, base))
     return scores
 
 
@@ -451,39 +490,35 @@ def predict_groups(
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
     """
-    3 组选10算法 + 一组选5复式6 + 一组混合选10复式11。
-    （内部仍先算三组选5，再整合为复式6。）
+    方案1 反马尔可夫链选10
+    方案2 反马尔可夫链+冷热平衡选10
+    方案3 马尔可夫链选10
+    最后：三组混合 → 选10复式11
     """
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
     am = anti_markov_scores(draws)
+    mk = markov_scores(draws)
 
     ranked_am = sorted(range(1, POOL + 1), key=lambda n: am[n], reverse=True)
+    # 方案2：反马尔可夫 + 冷热平衡（综合分中的冷热/遗漏）
     blend = {
-        n: 0.55 * am[n] + 0.45 * scores[n]["total"] for n in range(1, POOL + 1)
-    }
-    ranked_blend = sorted(blend.keys(), key=lambda n: blend[n], reverse=True)
-    cold_blend = {
-        n: 0.5 * am[n] + 0.35 * scores[n]["gap"] + 0.15 * scores[n]["hotcold"]
+        n: (
+            0.40 * am[n]
+            + 0.30 * scores[n]["hotcold"]
+            + 0.15 * scores[n]["gap"]
+            + 0.15 * scores[n]["total"]
+        )
         for n in range(1, POOL + 1)
     }
-    ranked_cb = sorted(cold_blend.keys(), key=lambda n: cold_blend[n], reverse=True)
+    ranked_blend = sorted(blend.keys(), key=lambda n: blend[n], reverse=True)
+    ranked_mk = sorted(range(1, POOL + 1), key=lambda n: mk[n], reverse=True)
 
     # 选10 · 三组
     scheme1 = _balance_pick(ranked_am, scores, PICK_N, max_zone=3)
     scheme2 = _balance_pick(ranked_blend, scores, PICK_N, max_zone=3)
-    scheme3 = _balance_pick(ranked_cb, scores, PICK_N, max_zone=3)
-    # 内部三组选5 → 整合为选5复式6
-    scheme1_5 = _balance_pick(ranked_am, scores, PICK_N5, max_zone=2)
-    scheme2_5 = _balance_pick(ranked_blend, scores, PICK_N5, max_zone=2)
-    scheme3_5 = _balance_pick(ranked_cb, scores, PICK_N5, max_zone=2)
-    duplex5 = _merge_by_votes(
-        [scheme1_5, scheme2_5, scheme3_5],
-        scores,
-        PICK_DUPLEX_5,
-        filler=ranked_blend,
-    )
-    # 混合选10复式11：覆盖三组差异化命中空间
+    scheme3 = _balance_pick(ranked_mk, scores, PICK_N, max_zone=3)
+    # 三组混合 → 选10复式11
     duplex10 = _merge_by_votes(
         [scheme1, scheme2, scheme3],
         scores,
@@ -495,13 +530,8 @@ def predict_groups(
         "core": scheme2,
         "scheme1_anti_markov": scheme1,
         "scheme2_am_hotcold": scheme2,
-        "scheme3_am_cold": scheme3,
-        "duplex5_6": duplex5,
+        "scheme3_markov": scheme3,
         "duplex10_11": duplex10,
-        # 内部保留，供复盘对比/金胆共识（报告主输出不再单列三组选5）
-        "scheme1_anti_markov_5": scheme1_5,
-        "scheme2_am_hotcold_5": scheme2_5,
-        "scheme3_am_cold_5": scheme3_5,
     }
 
 
@@ -758,18 +788,30 @@ def review_all_schemes(
 ) -> Dict:
     """复盘全部保留方案；主复盘用 primary_key。"""
     details = {}
-    review_keys = list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5) + list(SCHEME_KEYS_DUPLEX)
+    review_keys = (
+        list(SCHEME_KEYS_10)
+        + list(SCHEME_KEYS_LEGACY)
+        + list(SCHEME_KEYS_DUPLEX)
+    )
+    # 去重且保序
+    seen = set()
+    ordered_keys = []
     for key in review_keys:
+        if key not in seen:
+            seen.add(key)
+            ordered_keys.append(key)
+    for key in ordered_keys:
         nums = groups.get(key)
         if not nums:
             continue
         details[key] = review_prediction(draw_numbers, nums, draws_before)
 
     # 三组选10是否打出不同命中号（互补）→ 支持混合复式
-    hit_sets = []
-    for key in SCHEME_KEYS_10:
-        if key in details:
-            hit_sets.append(set(details[key]["hits"]))
+    # 兼容旧键 scheme3_am_cold
+    keys_10 = [k for k in SCHEME_KEYS_10 if k in details]
+    if "scheme3_markov" not in keys_10 and "scheme3_am_cold" in details:
+        keys_10.append("scheme3_am_cold")
+    hit_sets = [set(details[k]["hits"]) for k in keys_10]
     union_hits = set().union(*hit_sets) if hit_sets else set()
     unique_only = []
     if len(hit_sets) >= 2:
@@ -777,7 +819,7 @@ def review_all_schemes(
             others = set().union(*(hit_sets[j] for j in range(len(hit_sets)) if j != i))
             only = hs - others
             if only:
-                unique_only.append((SCHEME_KEYS_10[i], sorted(only)))
+                unique_only.append((keys_10[i], sorted(only)))
     max_single = max((len(hs) for hs in hit_sets), default=0)
     complementary = bool(unique_only) or (len(union_hits) > max_single)
 
@@ -1223,7 +1265,10 @@ def render_report(
         details = review.get("scheme_details") or {}
         if details:
             a("各组命中：")
-            for key in list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5) + list(SCHEME_KEYS_DUPLEX):
+            show_keys = list(SCHEME_KEYS_10) + [
+                k for k in details if k not in SCHEME_KEYS_10
+            ]
+            for key in show_keys:
                 if key not in details:
                     continue
                 d = details[key]
@@ -1330,22 +1375,18 @@ def render_report(
         a("")
     a("【选10 · 三组算法】")
     a(f"方案1 反马尔可夫链：{fmt_nums(groups['scheme1_anti_markov'])}")
-    a(f"方案2 反马尔可夫链+热冷平衡：{fmt_nums(groups['scheme2_am_hotcold'])}")
-    a(f"方案3 反马尔可夫链+冷号回补：{fmt_nums(groups['scheme3_am_cold'])}")
+    a(f"方案2 反马尔可夫链+冷热平衡：{fmt_nums(groups['scheme2_am_hotcold'])}")
+    a(f"方案3 马尔可夫链：{fmt_nums(groups['scheme3_markov'])}")
     a("")
-    a("【复式整合】")
+    a("【三组混合复式】")
     a(
-        f"选5复式6（三组选5整合，C(6,5)=6注）："
-        f"{fmt_nums(groups['duplex5_6'])}"
-    )
-    a(
-        f"选10复式11（三组混合覆盖，C(11,10)=11注）："
+        f"选10复式11（三组混合，C(11,10)=11注）："
         f"{fmt_nums(groups['duplex10_11'])}"
     )
-    a("说明：因三组常打出不同命中号，复式11用于扩大并集覆盖。")
+    a("说明：方案1反马 / 方案2反马+冷热 / 方案3正马，混合覆盖差异命中。")
     a("")
     a(f"推荐10个核心号码：{fmt_nums(groups['scheme2_am_hotcold'])}")
-    a(f"推荐选5复式6：{fmt_nums(groups['duplex5_6'])}")
+    a(f"推荐选10复式11：{fmt_nums(groups['duplex10_11'])}")
     a("")
     a("━━━━━━━━━━━━")
     a("")
