@@ -30,14 +30,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="仅导入数据库，不预测",
     )
+    p.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="删除旧版数据库后从 CSV 重建，再预测",
+    )
     args = p.parse_args(argv)
 
     if args.import_only:
-        n = db.bootstrap_from_csv(args.csv or db.CSV_PATH)
-        print(f"已导入 {n} 期到 {db.DB_PATH}")
+        if args.rebuild:
+            n = db.rebuild_from_csv(args.csv or db.CSV_PATH)
+            print(f"已删除旧库并重建，导入 {n} 期到 {db.DB_PATH}")
+        else:
+            n = db.bootstrap_from_csv(args.csv or db.CSV_PATH)
+            print(f"已导入 {n} 期到 {db.DB_PATH}")
         return 0
 
-    result = run_pipeline(args.csv)
+    result = run_pipeline(args.csv, rebuild=args.rebuild)
     print(result["report"])
     print(f"\n[OK] 报告已写入: {result['report_path']}")
     print(f"[OK] 数据库: {db.DB_PATH}")

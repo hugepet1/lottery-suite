@@ -27,18 +27,28 @@ PICK_DUPLEX_5 = 6   # 选5复式6 → C(6,5)=6 注
 PICK_DUPLEX_10 = 11  # 选10复式11 → C(11,10)=11 注
 LONG_TERM = (2, 11, 14, 27, 39, 49, 54, 62, 69, 75)
 
+# 投注方案仅允许：选10复式11 + 选5复式6（均按口诀）
+SCHEME_KEYS_BET = (
+    "scheme4_folk_duplex11",
+    "duplex5_6",
+)
+# 研究用四组选10（不作为投注方案输出）
 SCHEME_KEYS_10 = (
     "scheme1_ensemble",
-    "scheme2_gap_rhythm",
-    "scheme3_cooc_hot",
+    "scheme2_cold_rebound",
+    "scheme3_hot_continue",
+    "scheme4_random_opt",
 )
 # 历史方案键（复盘兼容）
 SCHEME_KEYS_LEGACY = (
+    "scheme1_ensemble",
+    "scheme2_gap_rhythm",
+    "scheme3_cooc_hot",
     "scheme1_anti_markov",
     "scheme2_am_hotcold",
     "scheme3_markov",
     "scheme3_am_cold",
-    "scheme4_folk_koujue",  # 旧：口诀选10；现为复式11
+    "scheme4_folk_koujue",
     "scheme4_pattern_hedge",
     "scheme1_anti_markov_5",
     "scheme2_am_hotcold_5",
@@ -54,26 +64,29 @@ SCHEME_KEYS_5 = (
 )
 SCHEME_KEYS_DUPLEX = (
     "scheme4_folk_duplex11",  # 口诀选10复式11
-    "duplex5_6",
-    "scheme4_folk_koujue",  # 兼容旧键
+    "duplex5_6",              # 口诀选5复式6
+    "scheme4_folk_koujue",    # 兼容旧键
     "duplex10_11",
 )
 SCHEME_LABELS = {
-    "scheme1_ensemble": "方案1 多因子集成+技巧（选10）",
-    "scheme2_gap_rhythm": "方案2 遗漏节奏/空位口诀（选10）",
-    "scheme3_cooc_hot": "方案3 共现热/重号对称封口（选10）",
-    "scheme4_folk_duplex11": "方案4 口诀选10复式11",
-    "scheme4_folk_koujue": "方案4 口诀专选（选10·旧）",
-    "scheme4_pattern_hedge": "方案4 形态均衡对冲（选10·旧）",
-    "scheme1_anti_markov": "方案1 反马尔可夫链（选10·旧）",
-    "scheme2_am_hotcold": "方案2 反马尔可夫+冷热（选10·旧）",
-    "scheme3_markov": "方案3 马尔可夫链（选10·旧）",
-    "scheme3_am_cold": "方案3 冷号回补（选10·旧）",
-    "scheme1_anti_markov_5": "方案1 选5·旧",
-    "scheme2_am_hotcold_5": "方案2 选5·旧",
-    "scheme3_am_cold_5": "方案3 选5·旧",
-    "scheme3_markov_5": "方案3 马尔可夫选5·旧",
-    "duplex5_6": "选5复式6",
+    "scheme1_ensemble": "研究组1 综合模型（选10）",
+    "scheme2_cold_rebound": "研究组2 冷号回补（选10）",
+    "scheme3_hot_continue": "研究组3 热号延续（选10）",
+    "scheme4_random_opt": "研究组4 随机优化（选10）",
+    "scheme2_gap_rhythm": "研究组 遗漏节奏（选10·旧）",
+    "scheme3_cooc_hot": "研究组 共现热（选10·旧）",
+    "scheme4_folk_duplex11": "口诀选10复式11",
+    "scheme4_folk_koujue": "口诀专选（选10·旧）",
+    "scheme4_pattern_hedge": "形态均衡对冲（选10·旧）",
+    "scheme1_anti_markov": "反马尔可夫链（选10·旧）",
+    "scheme2_am_hotcold": "反马尔可夫+冷热（选10·旧）",
+    "scheme3_markov": "马尔可夫链（选10·旧）",
+    "scheme3_am_cold": "冷号回补（选10·旧）",
+    "scheme1_anti_markov_5": "选5·旧",
+    "scheme2_am_hotcold_5": "选5·旧",
+    "scheme3_am_cold_5": "选5·旧",
+    "scheme3_markov_5": "马尔可夫选5·旧",
+    "duplex5_6": "口诀选5复式6",
     "duplex10_11": "选10复式11（旧混合）",
 }
 
@@ -131,11 +144,17 @@ def save_weights(weights: Dict[str, float]) -> Dict[str, float]:
     return w
 
 
-def ensure_database(csv_path: Optional[Path] = None) -> List[Dict]:
-    """建立/刷新数据库，并同步 history.json。"""
+def ensure_database(
+    csv_path: Optional[Path] = None,
+    *,
+    rebuild: bool = False,
+) -> List[Dict]:
+    """建立/刷新数据库，并同步 history.json。rebuild=True 时删除旧库后重建。"""
     db.ensure_dir()
     path = csv_path or db.CSV_PATH
-    if path.exists():
+    if rebuild:
+        db.rebuild_from_csv(path)
+    elif path.exists():
         db.import_csv(path)
     draws = db.load_draws()
     if draws:
@@ -891,11 +910,10 @@ def predict_groups(
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
     """
-    自由算法三组选10 + 口诀选10复式11 + 选5复式6：
-    方案1 多因子集成 + 技巧
-    方案2 遗漏节奏 / 空位口诀
-    方案3 共现热延续 / 重号对称封口
-    方案4 口诀五法 → 选10复式11
+    投注方案仅两组（均完全按口诀五法）：
+      - 口诀选10复式11（C(11,10)=11注）
+      - 口诀选5复式6（C(6,5)=6注）
+    另生成四组研究选10（综合/冷号/热号/随机），仅供分析，不作为投注方案。
     """
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
@@ -907,8 +925,9 @@ def predict_groups(
     folk = folk_tips_analysis(draws)
     folk_s: Dict[int, float] = folk["scores"]  # type: ignore[assignment]
     gaps = current_gaps(draws)
+    rng = random.Random(seed + 17)
 
-    # ---- 方案1：多因子集成 + 民间技巧 ----
+    # ---- 研究组1：综合模型 ----
     ens = {
         n: (
             0.18 * scores[n]["total"]
@@ -930,86 +949,65 @@ def predict_groups(
             ens[n] *= 0.88
     ranked1 = sorted(ens.keys(), key=lambda n: ens[n], reverse=True)
 
-    # ---- 方案2：遗漏节奏 + 三空/四空/六空口诀 ----
-    gap_focus = {
+    # ---- 研究组2：冷号回补 ----
+    cold_focus = {
         n: (
-            0.34 * rhythm[n]
-            + 0.22 * folk_s[n]
-            + 0.18 * scores[n]["gap"]
-            + 0.14 * scores[n]["hotcold"]
-            + 0.07 * am[n]
-            + 0.05 * scores[n]["total"]
+            0.36 * scores[n]["gap"]
+            + 0.22 * rhythm[n]
+            + 0.18 * scores[n]["hotcold"]
+            + 0.14 * folk_s[n]
+            + 0.10 * am[n]
         )
         for n in range(1, POOL + 1)
     }
-    ranked2 = sorted(gap_focus.keys(), key=lambda n: gap_focus[n], reverse=True)
+    for n in cold_focus:
+        if gaps[n] >= 6:
+            cold_focus[n] += min(18.0, gaps[n] * 1.2)
+        if n in last:
+            cold_focus[n] *= 0.75
+    ranked2 = sorted(cold_focus.keys(), key=lambda n: cold_focus[n], reverse=True)
 
-    # ---- 方案3：共现热 + 重号/对称/封口/斜连 ----
+    # ---- 研究组3：热号延续 ----
     hot_focus = {
         n: (
-            0.26 * cooc[n]
-            + 0.22 * ema[n]
-            + 0.18 * folk_s[n]
+            0.28 * ema[n]
+            + 0.24 * cooc[n]
+            + 0.18 * scores[n]["freq"]
             + 0.16 * mk[n]
-            + 0.10 * scores[n]["total"]
-            + 0.08 * scores[n]["consec"]
+            + 0.14 * folk_s[n]
         )
         for n in range(1, POOL + 1)
     }
     ranked3 = sorted(hot_focus.keys(), key=lambda n: hot_focus[n], reverse=True)
 
+    # ---- 研究组4：机器随机优化（评分扰动抽样）----
+    noise_focus = {
+        n: scores[n]["total"] * 0.55
+        + folk_s[n] * 0.25
+        + rng.uniform(0, 35)
+        for n in range(1, POOL + 1)
+    }
+    ranked4 = sorted(noise_focus.keys(), key=lambda n: noise_focus[n], reverse=True)
+
     scheme1 = _balance_pick(ranked1, scores, PICK_N, max_zone=3)
     scheme2 = _balance_pick(ranked2, scores, PICK_N, max_zone=3)
     scheme3 = _balance_pick(ranked3, scores, PICK_N, max_zone=3)
+    scheme4_research = _balance_pick(ranked4, scores, PICK_N, max_zone=3)
 
-    # 若三组重叠过高，方案2/3做差异化替补以提升并集覆盖
-    def _diversify(base: List[int], ranked: Sequence[int], avoid: set, need: int = PICK_N) -> List[int]:
-        out = list(base)
-        for cand in ranked:
-            if len(out) >= need:
-                break
-            if cand in avoid or cand in out:
-                continue
-            # 保持简易区间约束
-            zc = Counter(zone_of(x) for x in out)
-            if zc[zone_of(cand)] >= 3:
-                continue
-            out.append(cand)
-        return sorted(out[:need])
-
-    overlap12 = len(set(scheme1) & set(scheme2))
-    overlap13 = len(set(scheme1) & set(scheme3))
-    if overlap12 >= 6:
-        scheme2 = _diversify(scheme2[:6], ranked2, set(scheme1))
-    if overlap13 >= 6:
-        scheme3 = _diversify(scheme3[:6], ranked3, set(scheme1) | set(scheme2))
-
-    # ---- 方案4：口诀五法 → 选10复式11（C(11,10)=11注）----
-    scheme4_duplex = pick_folk_koujue(draws, count=PICK_DUPLEX_10)
-
-    # 选5复式6：三组选10各取 Top5 + 口诀复式前5，投票整合为 6 码
-    pick5_1 = _balance_pick(ranked1, scores, PICK_N5, max_zone=2)
-    pick5_2 = _balance_pick(ranked2, scores, PICK_N5, max_zone=2)
-    pick5_3 = _balance_pick(ranked3, scores, PICK_N5, max_zone=2)
-    pick5_4 = (
-        scheme4_duplex[:PICK_N5]
-        if len(scheme4_duplex) >= PICK_N5
-        else scheme4_duplex
-    )
-    duplex5 = _merge_by_votes(
-        [pick5_1, pick5_2, pick5_3, pick5_4],
-        scores,
-        PICK_DUPLEX_5,
-        filler=ranked1,
-        guarantee_each=1,
-    )
+    # ---- 投注方案：完全按口诀五法 ----
+    duplex11 = pick_folk_koujue(draws, count=PICK_DUPLEX_10)
+    duplex5 = pick_folk_koujue(draws, count=PICK_DUPLEX_5)
+    # 核心10：口诀复式11中按口诀分取前10
+    folk_rank = sorted(duplex11, key=lambda n: folk_s.get(n, 0.0), reverse=True)
+    core10 = sorted(folk_rank[:PICK_N])
 
     return {
-        "core": scheme1,
+        "core": core10,
         "scheme1_ensemble": scheme1,
-        "scheme2_gap_rhythm": scheme2,
-        "scheme3_cooc_hot": scheme3,
-        "scheme4_folk_duplex11": scheme4_duplex,
+        "scheme2_cold_rebound": scheme2,
+        "scheme3_hot_continue": scheme3,
+        "scheme4_random_opt": scheme4_research,
+        "scheme4_folk_duplex11": duplex11,
         "duplex5_6": duplex5,
         "folk_tips": folk["detail"],
     }
@@ -1277,12 +1275,13 @@ def review_all_schemes(
     draw_numbers: Sequence[int],
     groups: Dict[str, List[int]],
     draws_before: Sequence[Dict],
-    primary_key: str = "scheme1_ensemble",
+    primary_key: str = "scheme4_folk_duplex11",
 ) -> Dict:
-    """复盘全部保留方案；主复盘用 primary_key。"""
+    """复盘投注方案与历史方案；主复盘用 primary_key（默认口诀复式11）。"""
     details = {}
     review_keys = (
-        list(SCHEME_KEYS_10)
+        list(SCHEME_KEYS_BET)
+        + list(SCHEME_KEYS_10)
         + list(SCHEME_KEYS_LEGACY)
         + list(SCHEME_KEYS_DUPLEX)
     )
@@ -1299,18 +1298,9 @@ def review_all_schemes(
             continue
         details[key] = review_prediction(draw_numbers, nums, draws_before)
 
-    # 当前三组或旧三组
-    keys_10 = [k for k in SCHEME_KEYS_10 if k in details]
-    if len(keys_10) < 2:
-        for k in (
-            "scheme1_anti_markov",
-            "scheme2_am_hotcold",
-            "scheme3_markov",
-            "scheme3_am_cold",
-        ):
-            if k in details and k not in keys_10:
-                keys_10.append(k)
-    hit_sets = [set(details[k]["hits"]) for k in keys_10]
+    # 投注两组互补分析
+    keys_bet = [k for k in SCHEME_KEYS_BET if k in details]
+    hit_sets = [set(details[k]["hits"]) for k in keys_bet]
     union_hits = set().union(*hit_sets) if hit_sets else set()
     unique_only = []
     if len(hit_sets) >= 2:
@@ -1318,14 +1308,15 @@ def review_all_schemes(
             others = set().union(*(hit_sets[j] for j in range(len(hit_sets)) if j != i))
             only = hs - others
             if only:
-                unique_only.append((keys_10[i], sorted(only)))
+                unique_only.append((keys_bet[i], sorted(only)))
     max_single = max((len(hs) for hs in hit_sets), default=0)
     complementary = bool(unique_only) or (len(union_hits) > max_single)
 
     primary_nums = (
         groups.get(primary_key)
+        or groups.get("scheme4_folk_duplex11")
+        or groups.get("scheme4_folk_koujue")
         or groups.get("scheme1_ensemble")
-        or groups.get("scheme2_am_hotcold")
         or groups.get("numbers")
         or []
     )
@@ -1334,13 +1325,12 @@ def review_all_schemes(
     primary["scheme_key"] = primary_key
     if complementary:
         note = (
-            f"多组打出不同命中号，并集 {len(union_hits)} 个"
+            f"投注两组打出不同命中号，并集 {len(union_hits)} 个"
             f"（单组最高 {max_single}）："
-            f"{fmt_nums(sorted(union_hits)) if union_hits else '无'}；"
-            "可用口诀选10复式11补齐差异命中"
+            f"{fmt_nums(sorted(union_hits)) if union_hits else '无'}"
         )
     else:
-        note = "各组命中重叠为主，口诀选10复式11作补充"
+        note = "投注两组命中重叠为主（口诀选10复式11 / 选5复式6）"
     primary["complementary"] = {
         "enabled": complementary,
         "union_hits": sorted(union_hits),
@@ -1404,7 +1394,7 @@ def backtest(
     draws: Sequence[Dict],
     window: int = 50,
     weights: Optional[Dict[str, float]] = None,
-    scheme: str = "scheme1_ensemble",
+    scheme: str = "scheme4_folk_duplex11",
 ) -> Dict:
     """用前 i 期预测第 i+1 期，统计最近 window 期命中。"""
     if len(draws) < window + 15:
@@ -1418,10 +1408,13 @@ def backtest(
         groups = predict_groups(hist, w, seed=1000 + i)
         pred = (
             groups.get(scheme)
+            or groups.get("scheme4_folk_duplex11")
             or groups.get("scheme1_ensemble")
-            or groups.get("duplex10_11")
             or []
         )
+        # 选10复式11回测按口诀核心10计（与「预测10个号码」目标一致）
+        if scheme == "scheme4_folk_duplex11":
+            pred = groups.get("core") or list(pred)[:PICK_N]
         hit = sum(1 for n in pred if n in actual)
         hits_list.append(hit)
     if not hits_list:
@@ -1535,8 +1528,8 @@ def save_last_prediction(payload: Dict) -> None:
     )
 
 
-def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
-    draws = ensure_database(csv_path)
+def run_pipeline(csv_path: Optional[Path] = None, *, rebuild: bool = False) -> Dict:
+    draws = ensure_database(csv_path, rebuild=rebuild)
     if len(draws) < 20:
         raise RuntimeError(f"历史数据不足（{len(draws)} 期），至少需要约 20 期。")
 
@@ -1545,43 +1538,30 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
     latest = draws[-1]
     review_block = None
     adjust_notes: List[str] = ["首次运行或无上一期预测，保持默认/当前权重"]
+    if rebuild:
+        adjust_notes = ["已删除旧版数据库并从 CSV 重建，权重与复盘记录已迁移保留"]
 
     # 复盘：仅当存在「针对最新已开奖期」的预测时才对比
     if last_pred and int(last_pred.get("target_period", -1)) == int(latest["period"]):
         prev_groups = dict(last_pred.get("groups") or {})
         if last_pred.get("numbers") and not any(
             k in prev_groups
-            for k in list(SCHEME_KEYS_10)
+            for k in list(SCHEME_KEYS_BET)
+            + list(SCHEME_KEYS_10)
             + ["scheme1_anti_markov", "scheme2_am_hotcold", "scheme3_markov"]
         ):
-            prev_groups["scheme2_am_hotcold"] = last_pred["numbers"]
-        if "duplex10_11" not in prev_groups:
-            s10 = []
-            for k in list(SCHEME_KEYS_10) + [
-                "scheme1_anti_markov",
-                "scheme2_am_hotcold",
-                "scheme3_markov",
-                "scheme3_am_cold",
-            ]:
-                if k in prev_groups and prev_groups[k] and prev_groups[k] not in s10:
-                    s10.append(prev_groups[k])
-            if s10:
-                votes = Counter()
-                for lst in s10:
-                    for n in lst:
-                        votes[int(n)] += 1
-                ranked = [n for n, _ in votes.most_common()]
-                fill = prev_groups.get("scheme1_ensemble") or prev_groups.get(
-                    "scheme2_am_hotcold"
-                ) or []
-                for n in fill:
-                    if n not in ranked:
-                        ranked.append(int(n))
-                prev_groups["duplex10_11"] = sorted(ranked[:PICK_DUPLEX_10])
-        # 主复盘键：优先新方案，否则旧方案2
-        primary_key = "scheme1_ensemble"
+            prev_groups["scheme4_folk_duplex11"] = list(last_pred["numbers"])
+        if "scheme4_folk_duplex11" not in prev_groups and "duplex10_11" in prev_groups:
+            prev_groups["scheme4_folk_duplex11"] = prev_groups["duplex10_11"]
+        # 主复盘键：口诀选10复式11
+        primary_key = "scheme4_folk_duplex11"
         if primary_key not in prev_groups:
-            for k in ("scheme2_am_hotcold", "scheme2_gap_rhythm", "scheme1_anti_markov"):
+            for k in (
+                "scheme4_folk_koujue",
+                "duplex10_11",
+                "scheme1_ensemble",
+                "scheme2_am_hotcold",
+            ):
                 if k in prev_groups:
                     primary_key = k
                     break
@@ -1622,23 +1602,16 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
             adjust_notes.append(note)
         detail_keys = [
             k
-            for k in list(SCHEME_KEYS_10)
+            for k in list(SCHEME_KEYS_BET)
+            + list(SCHEME_KEYS_10)
             + list(SCHEME_KEYS_DUPLEX)
-            + [
-                "scheme1_anti_markov",
-                "scheme2_am_hotcold",
-                "scheme3_markov",
-                "scheme3_am_cold",
-                "scheme4_folk_koujue",
-                "scheme4_pattern_hedge",
-                "duplex10_11",
-            ]
+            + list(SCHEME_KEYS_LEGACY)
             if k in review_block.get("scheme_details", {})
         ]
         best_key = max(
             detail_keys,
             key=lambda k: review_block["scheme_details"][k]["hit_count"],
-            default="scheme1_ensemble",
+            default="scheme4_folk_duplex11",
         )
         if best_key:
             adjust_notes.append(
@@ -1646,7 +1619,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
                 f"({review_block['scheme_details'][best_key]['hit_rate']})"
             )
         adjust_notes.append(
-            "三组已切换为自由算法：集成优选 / 遗漏节奏 / 共现热延续（按回测提命中）"
+            "投注方案仅保留口诀选10复式11 + 口诀选5复式6（完全按五法口诀）"
         )
         if review_block.get("complementary"):
             adjust_notes.append(review_block["complementary"]["note"])
@@ -1659,26 +1632,34 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
             fail_reasons={
                 "reasons": review_block["fail_reasons"],
                 "primary": review_block["primary_reasons"],
+                "scheme_key": review_block.get("scheme_key"),
                 "schemes": {
                     k: {"hit_rate": v["hit_rate"], "hits": v["hits"]}
                     for k, v in review_block.get("scheme_details", {}).items()
                 },
                 "jin_dan": review_block.get("jin_dan"),
+                "complementary": review_block.get("complementary"),
             },
             created_at=_now(),
         )
     elif last_pred and int(last_pred.get("target_period", -1)) > int(latest["period"]):
-        adjust_notes = [
+        notes = [
             f"已有针对第 {last_pred.get('target_period')} 期的预测，"
             "等待该期开奖后再复盘；本次刷新分析与方案"
         ]
+        if rebuild:
+            notes.insert(0, "已删除旧版数据库并从 CSV 重建，权重与复盘记录已迁移保留")
+        adjust_notes = notes
         # 报告仍展示已落库的上期复盘，避免重复跑流水线后复盘区变空
         review_block = db.load_latest_review(int(latest["period"]))
     elif last_pred:
-        adjust_notes = [
+        notes = [
             f"上一份预测目标期为 {last_pred.get('target_period')}，"
             f"最新开奖为 {latest['period']}，跳过无效复盘"
         ]
+        if rebuild:
+            notes.insert(0, "已删除旧版数据库并从 CSV 重建，权重与复盘记录已迁移保留")
+        adjust_notes = notes
         review_block = db.load_latest_review(int(latest["period"]))
 
     # 每累计 50 期回测并优化
@@ -1703,8 +1684,8 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
     long_term = analyze_long_term(draws)
     next_period = int(latest["period"]) + 1
 
-    # 主推荐：方案1 多因子集成
-    primary = groups["scheme1_ensemble"]
+    # 主推荐：口诀选10复式11
+    primary = groups["scheme4_folk_duplex11"]
 
     pred_payload = {
         "target_period": next_period,
@@ -1792,14 +1773,19 @@ def render_report(
     a(f"开奖期号：{latest['period']}（{latest['date']}）")
     a(f"开奖号码：{fmt_nums(latest['numbers'])}")
     if review:
-        a(f"主预测：{fmt_nums(review['pred_numbers'])}")
+        sk = review.get("scheme_key") or ""
+        if sk and sk in SCHEME_LABELS:
+            a(f"主预测（{SCHEME_LABELS[sk]}）：{fmt_nums(review['pred_numbers'])}")
+        else:
+            a(f"主预测：{fmt_nums(review['pred_numbers'])}")
         a(f"命中：{fmt_nums(review['hits']) if review['hits'] else '无'}")
         a(f"命中率：{review['hit_rate']}")
         details = review.get("scheme_details") or {}
         if details:
             a("各组命中：")
-            show_keys = list(SCHEME_KEYS_10) + [
-                k for k in details if k not in SCHEME_KEYS_10
+            # 投注方案优先，再展示口诀/研究组命中
+            show_keys = list(SCHEME_KEYS_BET) + [
+                k for k in details if k not in SCHEME_KEYS_BET
             ]
             for key in show_keys:
                 if key not in details:
@@ -1906,45 +1892,32 @@ def render_report(
             + " ".join(f"{n:02d}({s})" for n, s in jin_dan["top5"])
         )
         a("")
+    a("【口诀选号·五法】")
+    a("方法一：三空打中间、四空打两边、六空以上打连子")
+    a("方法二：关注封口号")
+    a("方法三：斜连号，重打两边")
+    a("方法四：重号加重号")
+    a("方法五：跨度定胆（最大号减最小号）")
+    a("投注方案仅允许：1组选10复式11 + 1组选5复式6")
+    a("")
     if folk_tips:
-        a("【民间技巧参考·仅供研究】")
+        a("【本期口诀落点】")
         a(f"上期跨度：{folk_tips.get('span')} → 跨度定胆候选 {fmt_nums(folk_tips.get('span_dan') or [])}")
         a(f"三空打中间：{fmt_nums(folk_tips.get('san_kong') or []) or '无'}")
         a(f"四空打两边：{fmt_nums(folk_tips.get('si_kong') or []) or '无'}")
         a(f"六空以上打连子：{fmt_nums(folk_tips.get('liu_kong') or []) or '无'}")
         a(f"封口号：{fmt_nums(folk_tips.get('fengkou') or [])}")
+        a(f"斜连重打两边参考：{fmt_nums((folk_tips.get('xie_lian') or [])[:16])}")
         a(f"重号：{fmt_nums(folk_tips.get('zhong_hao') or []) or '无'}")
         a(f"对称号：{fmt_nums(folk_tips.get('dui_cheng') or [])}")
-        a("（方案1–3：技巧只加分；方案4：口诀选10复式11）")
         a("")
-    a("【选10 · 三组预测】")
-    a(f"方案1 多因子集成+技巧：{fmt_nums(groups['scheme1_ensemble'])}")
-    a(f"方案2 遗漏节奏/空位口诀：{fmt_nums(groups['scheme2_gap_rhythm'])}")
-    a(f"方案3 共现热/重号对称封口：{fmt_nums(groups['scheme3_cooc_hot'])}")
+    s4 = groups.get("scheme4_folk_duplex11") or []
+    d56 = groups.get("duplex5_6") or []
+    a("【投注方案】")
+    a(f"选10复式11（C(11,10)=11注）：{fmt_nums(s4)}")
+    a(f"选5复式6（C(6,5)=6注）：{fmt_nums(d56)}")
     a("")
-    a("【复式】")
-    s4 = (
-        groups.get("scheme4_folk_duplex11")
-        or groups.get("scheme4_folk_koujue")
-        or groups.get("scheme4_pattern_hedge")
-        or []
-    )
-    a(f"方案4 口诀选10复式11（C(11,10)=11注）：{fmt_nums(s4)}")
-    a(
-        "（口诀：①三空中间/四空两边/六空连子 ②封口 "
-        "③斜连重打两边 ④重号加重号 ⑤跨度定胆）"
-    )
-    if groups.get("duplex5_6"):
-        a(
-            f"选5复式6（三组+口诀整合，C(6,5)=6注）："
-            f"{fmt_nums(groups['duplex5_6'])}"
-        )
-    a("")
-    a(f"推荐10个核心号码：{fmt_nums(groups['scheme1_ensemble'])}")
-    if s4:
-        a(f"推荐口诀选10复式11：{fmt_nums(s4)}")
-    if groups.get("duplex5_6"):
-        a(f"推荐选5复式6：{fmt_nums(groups['duplex5_6'])}")
+    a(f"推荐10个核心号码：{fmt_nums(groups.get('core') or [])}")
     a("")
     a("━━━━━━━━━━━━")
     a("")
@@ -1969,6 +1942,12 @@ def render_report(
     a("  " + fmt_nums([n for n, _ in analysis["rising"]]))
     a("近期下降号码：")
     a("  " + fmt_nums([n for n, _ in analysis["falling"]]))
+    a("")
+    a("【研究用四组选10·不投注】")
+    a(f"综合模型：{fmt_nums(groups.get('scheme1_ensemble') or [])}")
+    a(f"冷号回补：{fmt_nums(groups.get('scheme2_cold_rebound') or [])}")
+    a(f"热号延续：{fmt_nums(groups.get('scheme3_hot_continue') or [])}")
+    a(f"随机优化：{fmt_nums(groups.get('scheme4_random_opt') or [])}")
     a("")
     a("号码综合评分 TOP20：")
     ranked = sorted(

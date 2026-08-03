@@ -271,6 +271,7 @@ def load_latest_review(period: int, db_path: Path = DB_PATH) -> Optional[Dict]:
         "hit_rate": f"{len(hits)}/{len(pred) if pred else 10}",
         "fail_reasons": fail.get("reasons") or {},
         "primary_reasons": fail.get("primary") or [],
+        "scheme_key": fail.get("scheme_key"),
         "scheme_details": scheme_details,
         "jin_dan": fail.get("jin_dan"),
         "complementary": fail.get("complementary"),
@@ -350,6 +351,101 @@ def latest_prediction_for_period(period: int, db_path: Path = DB_PATH) -> Option
         "weights": json.loads(row["weights_json"]),
         "created_at": row["created_at"],
     }
+
+
+def delete_database(db_path: Path = DB_PATH) -> bool:
+    """删除旧版 SQLite 数据库文件（若存在）。"""
+    existed = db_path.exists()
+    if existed:
+        db_path.unlink()
+    # 清理可能的旁路文件
+    for suffix in ("-wal", "-shm", "-journal"):
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            p.unlink()
+    return existed
+
+
+def _export_runtime_state(db_path: Path = DB_PATH) -> Dict:
+    """导出权重与复盘，供删库重建后恢复。"""
+    state: Dict = {"weights": None, "reviews": [], "backtests": []}
+    if not db_path.exists():
+        return state
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT weights_json, updated_at FROM model_weights WHERE id = 1"
+        ).fetchone()
+        if row:
+            state["weights"] = {
+                "weights": json.loads(row["weights_json"]),
+                "updated_at": row["updated_at"],
+            }
+        # 表可能不存在于损坏库
+        try:
+            reviews = conn.execute(
+                """
+                SELECT period, draw_numbers_json, pred_numbers_json, hits_json,
+                       hit_count, fail_reasons_json, created_at
+                FROM reviews ORDER BY id ASC
+                """
+            ).fetchall()
+            state["reviews"] = [dict(r) for r in reviews]
+        except sqlite3.Error:
+            pass
+    finally:
+        conn.close()
+    return state
+
+
+def _restore_runtime_state(state: Dict, db_path: Path = DB_PATH) -> None:
+    if not state:
+        return
+    conn = init_db(connect(db_path))
+    try:
+        w = state.get("weights")
+        if w:
+            conn.execute(
+                """
+                INSERT INTO model_weights (id, weights_json, updated_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    weights_json = excluded.weights_json,
+                    updated_at = excluded.updated_at
+                """,
+                [json.dumps(w["weights"]), w["updated_at"]],
+            )
+        for r in state.get("reviews") or []:
+            conn.execute(
+                """
+                INSERT INTO reviews (
+                    period, draw_numbers_json, pred_numbers_json, hits_json,
+                    hit_count, fail_reasons_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    r["period"],
+                    r["draw_numbers_json"],
+                    r["pred_numbers_json"],
+                    r["hits_json"],
+                    r["hit_count"],
+                    r["fail_reasons_json"],
+                    r["created_at"],
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def rebuild_from_csv(csv_path: Path = CSV_PATH, db_path: Path = DB_PATH) -> int:
+    """删除旧库后从 CSV 重建；保留权重与复盘记录。"""
+    ensure_dir()
+    state = _export_runtime_state(db_path)
+    delete_database(db_path)
+    n = import_csv(csv_path, db_path)
+    _restore_runtime_state(state, db_path)
+    return n
 
 
 def bootstrap_from_csv(csv_path: Path = CSV_PATH) -> int:
