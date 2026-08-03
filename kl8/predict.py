@@ -66,7 +66,7 @@ SCHEME_LABELS = {
     "scheme2_am_hotcold_5": "方案2 选5·旧",
     "scheme3_am_cold_5": "方案3 选5·旧",
     "scheme3_markov_5": "方案3 马尔可夫选5·旧",
-    "duplex5_6": "选5复式6（旧）",
+    "duplex5_6": "三组整合选5复式6",
     "duplex10_11": "三组混合选10复式11",
 }
 
@@ -832,12 +832,24 @@ def predict_groups(
         filler=ranked1,
         guarantee_each=2,
     )
+    # 选5复式6：各组先取 Top5，再投票整合为 6 码（C(6,5)=6注）
+    pick5_1 = _balance_pick(ranked1, scores, PICK_N5, max_zone=2)
+    pick5_2 = _balance_pick(ranked2, scores, PICK_N5, max_zone=2)
+    pick5_3 = _balance_pick(ranked3, scores, PICK_N5, max_zone=2)
+    duplex5 = _merge_by_votes(
+        [pick5_1, pick5_2, pick5_3],
+        scores,
+        PICK_DUPLEX_5,
+        filler=ranked1,
+        guarantee_each=1,
+    )
 
     return {
         "core": scheme1,
         "scheme1_ensemble": scheme1,
         "scheme2_gap_rhythm": scheme2,
         "scheme3_cooc_hot": scheme3,
+        "duplex5_6": duplex5,
         "duplex10_11": duplex10,
         "folk_tips": folk["detail"],
     }
@@ -1744,7 +1756,12 @@ def render_report(
     a(f"方案2 遗漏节奏/空位口诀：{fmt_nums(groups['scheme2_gap_rhythm'])}")
     a(f"方案3 共现热/重号对称封口：{fmt_nums(groups['scheme3_cooc_hot'])}")
     a("")
-    a("【三组混合复式】")
+    a("【复式整合】")
+    if groups.get("duplex5_6"):
+        a(
+            f"选5复式6（三组Top5整合，C(6,5)=6注）："
+            f"{fmt_nums(groups['duplex5_6'])}"
+        )
     a(
         f"选10复式11（三组混合+每组保送2码，C(11,10)=11注）："
         f"{fmt_nums(groups['duplex10_11'])}"
@@ -1752,6 +1769,8 @@ def render_report(
     a("说明：已融合民间技巧参考；复式优先覆盖三组差异化号码。")
     a("")
     a(f"推荐10个核心号码：{fmt_nums(groups['scheme1_ensemble'])}")
+    if groups.get("duplex5_6"):
+        a(f"推荐选5复式6：{fmt_nums(groups['duplex5_6'])}")
     a(f"推荐选10复式11：{fmt_nums(groups['duplex10_11'])}")
     a("")
     a("━━━━━━━━━━━━")
