@@ -110,6 +110,18 @@ WEIGHT_NAMES = {
     "noise": "随机扰动",
 }
 
+# 主体口诀 80% + 辅助算法 20%
+FOLK_BLEND_WEIGHT = 0.80
+ALGO_BLEND_WEIGHT = 0.20
+# 辅助算法内部再分配（合计 1.0，再乘以 ALGO_BLEND_WEIGHT）
+ALGO_ASSIST_SHARE = {
+    "gap": 0.30,       # 遗漏 → 6%
+    "hotcold": 0.25,   # 冷热 → 5%
+    "freq": 0.20,      # 频率 → 4%
+    "zone": 0.15,      # 区间 → 3%
+    "markov": 0.10,    # 马尔可夫 → 2%
+}
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "kl8"
 LAST_PRED_PATH = DATA_DIR / "last_prediction.json"
@@ -933,48 +945,195 @@ def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
     return pick_folk_koujue(draws, count=PICK_N)
 
 
+def _normalize_score_map(raw: Dict[int, float]) -> Dict[int, float]:
+    if not raw:
+        return {n: 0.0 for n in range(1, POOL + 1)}
+    vals = list(raw.values())
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 1e-9:
+        return {n: 50.0 for n in raw}
+    return {n: 100.0 * (raw[n] - lo) / (hi - lo) for n in raw}
+
+
+def algo_assist_scores(
+    draws: Sequence[Dict],
+    seed: int = 2026,
+) -> Dict[int, float]:
+    """辅助算法综合分（0-100），供 20% 权重使用。"""
+    scored = score_numbers(draws, DEFAULT_WEIGHTS, seed=seed)
+    mk = _normalize_score_map(markov_scores(draws))
+    share = ALGO_ASSIST_SHARE
+    out: Dict[int, float] = {}
+    for n in range(1, POOL + 1):
+        s = scored[n]
+        out[n] = (
+            share["gap"] * s["gap"]
+            + share["hotcold"] * s["hotcold"]
+            + share["freq"] * s["freq"]
+            + share["zone"] * s["zone"]
+            + share["markov"] * mk.get(n, 0.0)
+        )
+    return _normalize_score_map(out)
+
+
+def blend_folk_algo_scores(
+    draws: Sequence[Dict],
+    seed: int = 2026,
+) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, float], Dict]:
+    """
+    口诀80% + 辅助算法20%。
+    返回：(混合分, 口诀分, 算法分, 口诀detail)
+    """
+    folk = folk_tips_analysis(draws)
+    folk_s = _normalize_score_map(folk["scores"])  # type: ignore[arg-type]
+    algo_s = algo_assist_scores(draws, seed=seed)
+    blended = {
+        n: FOLK_BLEND_WEIGHT * folk_s[n] + ALGO_BLEND_WEIGHT * algo_s[n]
+        for n in range(1, POOL + 1)
+    }
+    return blended, folk_s, algo_s, folk["detail"]  # type: ignore[return-value]
+
+
+def _folk_candidate_pool(detail: Dict) -> List[int]:
+    """口诀五法候选池（保持主体）。"""
+    pool: List[int] = []
+    for key in (
+        "span_dan",
+        "san_kong",
+        "si_kong",
+        "liu_kong",
+        "fengkou",
+        "xie_bian",
+        "zhong_hao",
+        "zhong_nb",
+    ):
+        for x in detail.get(key) or []:
+            n = int(x)
+            if 1 <= n <= POOL and n not in pool:
+                pool.append(n)
+    for x in detail.get("xie_lian") or []:
+        n = int(x)
+        if 1 <= n <= POOL and n not in pool:
+            pool.append(n)
+    return pool
+
+
+def pick_hybrid_koujue(
+    draws: Sequence[Dict],
+    count: int,
+    seed: int = 2026,
+) -> Tuple[List[int], Dict[str, object]]:
+    """
+    混合选号：约 80% 名额来自口诀池，约 20% 名额由辅助算法补强。
+    精确跨度号强制保留。
+    """
+    need = max(1, int(count))
+    blended, folk_s, algo_s, detail = blend_folk_algo_scores(draws, seed=seed)
+    folk_pool = set(_folk_candidate_pool(detail))
+    span_dan = [int(x) for x in (detail.get("span_dan") or [])]
+    exact_span = span_dan[0] if span_dan else None
+
+    # 主体名额 ≈ 80%，辅助名额 ≈ 20%
+    folk_slots = max(1, int(round(need * FOLK_BLEND_WEIGHT)))
+    algo_slots = max(0, need - folk_slots)
+    if need >= PICK_DUPLEX_10:
+        folk_slots, algo_slots = 9, 2  # 11 码：9口诀 + 2算法
+    elif need >= PICK_DUPLEX_5:
+        folk_slots, algo_slots = 5, 1  # 6 码：5口诀 + 1算法
+
+    chosen: List[int] = []
+    if exact_span is not None:
+        chosen.append(exact_span)
+
+    # 1) 口诀池内按混合分取主体
+    folk_ranked = sorted(
+        [n for n in folk_pool if n not in chosen],
+        key=lambda n: (blended[n], folk_s[n], -n),
+        reverse=True,
+    )
+    for n in folk_ranked:
+        if len(chosen) >= folk_slots:
+            break
+        chosen.append(n)
+
+    # 口诀池不足时用纯口诀补
+    if len(chosen) < folk_slots:
+        pure = pick_folk_koujue(draws, count=need)
+        for n in pure:
+            if n not in chosen:
+                chosen.append(n)
+            if len(chosen) >= folk_slots:
+                break
+
+    # 2) 辅助算法补强：优先口诀池外、算法分高者
+    algo_ranked = sorted(
+        [n for n in range(1, POOL + 1) if n not in chosen],
+        key=lambda n: (algo_s[n], blended[n], -n),
+        reverse=True,
+    )
+    added_algo = 0
+    for n in algo_ranked:
+        if added_algo >= algo_slots or len(chosen) >= need:
+            break
+        # 略偏好非上期号，避免全挤热号
+        chosen.append(n)
+        added_algo += 1
+
+    # 3) 仍不足则按混合分补齐
+    if len(chosen) < need:
+        rest = sorted(
+            [n for n in range(1, POOL + 1) if n not in chosen],
+            key=lambda n: blended[n],
+            reverse=True,
+        )
+        for n in rest:
+            chosen.append(n)
+            if len(chosen) >= need:
+                break
+
+    meta = {
+        "folk_slots": folk_slots,
+        "algo_slots": algo_slots,
+        "exact_span": exact_span,
+        "blended": blended,
+        "folk_s": folk_s,
+        "algo_s": algo_s,
+        "detail": detail,
+    }
+    return sorted(chosen[:need]), meta
+
+
 def predict_groups(
     draws: Sequence[Dict],
     weights: Optional[Dict[str, float]] = None,
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
     """
-    禁止其它算法。投注方案仅两组，完全按口诀五法：
-      - 口诀选10复式11（C(11,10)=11注）
-      - 口诀选5复式6（C(6,5)=6注）
+    投注方案两组（口诀主体80% + 辅助算法20%）：
+      - 选10复式11（C(11,10)=11注）
+      - 选5复式6（C(6,5)=6注）
     """
-    del weights, seed  # 口诀专选不使用多因子权重/随机种子
-    folk = folk_tips_analysis(draws)
-    folk_s: Dict[int, float] = folk["scores"]  # type: ignore[assignment]
+    del weights
+    duplex11, meta = pick_hybrid_koujue(draws, count=PICK_DUPLEX_10, seed=seed)
+    duplex5, _ = pick_hybrid_koujue(draws, count=PICK_DUPLEX_5, seed=seed + 1)
+    blended: Dict[int, float] = meta["blended"]  # type: ignore[assignment]
+    detail = meta["detail"]
 
-    duplex11 = pick_folk_koujue(draws, count=PICK_DUPLEX_10)
-    duplex5 = pick_folk_koujue(draws, count=PICK_DUPLEX_5)
-
-    # 方法五：精确跨度号（金胆）必须进入复式方案
-    span_dan = [int(x) for x in (folk["detail"].get("span_dan") or [])]  # type: ignore[union-attr]
-    exact_span = span_dan[0] if span_dan else None
-    if exact_span is not None:
-        if exact_span not in duplex11:
-            # 替换口诀分最低者
-            weak = min(duplex11, key=lambda n: (folk_s.get(n, 0.0), -n))
-            duplex11 = sorted(
-                [exact_span if n == weak else n for n in duplex11]
-            )
-        if exact_span not in duplex5:
-            weak5 = min(duplex5, key=lambda n: (folk_s.get(n, 0.0), -n))
-            duplex5 = sorted(
-                [exact_span if n == weak5 else n for n in duplex5]
-            )
-
-    # 核心10：口诀复式11中按五法口诀分取前10
-    folk_rank = sorted(duplex11, key=lambda n: folk_s.get(n, 0.0), reverse=True)
+    folk_rank = sorted(duplex11, key=lambda n: blended.get(n, 0.0), reverse=True)
     core10 = sorted(folk_rank[:PICK_N])
 
     return {
         "core": core10,
         "scheme4_folk_duplex11": duplex11,
         "duplex5_6": duplex5,
-        "folk_tips": folk["detail"],
+        "folk_tips": detail,
+        "blend_meta": {
+            "folk_weight": FOLK_BLEND_WEIGHT,
+            "algo_weight": ALGO_BLEND_WEIGHT,
+            "algo_share": dict(ALGO_ASSIST_SHARE),
+            "folk_slots": meta["folk_slots"],
+            "algo_slots": meta["algo_slots"],
+        },
     }
 
 
@@ -989,13 +1148,11 @@ def predict_jin_dan(
     seed: int = 2026,
 ) -> Dict:
     """
-    金胆 = 口诀五法定胆（优先方法五跨度定胆），禁止其它算法。
+    金胆：方法五精确跨度（口诀主体）；银/铜按口诀80%+算法20%混合分。
     """
-    del weights, seed
-    folk = folk_tips_analysis(draws)
-    folk_s: Dict[int, float] = folk["scores"]  # type: ignore[assignment]
-    folk_d: Dict = folk["detail"]  # type: ignore[assignment]
-    groups = groups or predict_groups(draws)
+    del weights
+    blended, folk_s, algo_s, folk_d = blend_folk_algo_scores(draws, seed=seed)
+    groups = groups or predict_groups(draws, seed=seed)
     last_set = set(draws[-1]["numbers"]) if draws else set()
 
     span_dan = [int(x) for x in (folk_d.get("span_dan") or [])]
@@ -1007,7 +1164,6 @@ def predict_jin_dan(
     zhong = set(int(x) for x in (folk_d.get("zhong_hao") or []))
     zhong_nb = set(int(x) for x in (folk_d.get("zhong_nb") or []))
 
-    # 复式方案中的口诀号优先
     bet_pool = set()
     for key in ("scheme4_folk_duplex11", "duplex5_6", "core"):
         for n in groups.get(key) or []:
@@ -1015,33 +1171,27 @@ def predict_jin_dan(
 
     jin_scores: Dict[int, float] = {}
     for n in range(1, POOL + 1):
-        s = float(folk_s.get(n, 0.0))
-        if n in span_dan:
-            s += 40  # 方法五优先
-        if n in san:
-            s += 18
-        if n in si:
-            s += 14
-        if n in liu:
-            s += 12
-        if n in fengkou:
-            s += 16
-        if n in xie_bian:
-            s += 14
-        if n in zhong:
-            s += 12
-        if n in zhong_nb:
-            s += 10
+        # 主体仍是口诀加权，再叠加混合分
+        s = FOLK_BLEND_WEIGHT * (
+            float(folk_s.get(n, 0.0))
+            + (40 if n in span_dan else 0)
+            + (18 if n in san else 0)
+            + (14 if n in si else 0)
+            + (12 if n in liu else 0)
+            + (16 if n in fengkou else 0)
+            + (14 if n in xie_bian else 0)
+            + (12 if n in zhong else 0)
+            + (10 if n in zhong_nb else 0)
+        ) + ALGO_BLEND_WEIGHT * float(algo_s.get(n, 0.0))
+        s += 0.08 * float(blended.get(n, 0.0))
         if n in bet_pool:
-            s += 8
-        # 跨度定胆号即使上期开出也可作胆；其它上期号降权（重号除外）
+            s += 6
         if n in last_set and n not in zhong and n not in span_dan:
             s *= 0.55
         jin_scores[n] = s
 
-    # 金胆：方法五优先精确跨度；银/铜取其余口诀高分
     if span_dan:
-        gold = int(span_dan[0])  # 精确跨度号
+        gold = int(span_dan[0])
         others = [n for n in range(1, POOL + 1) if n != gold]
         ranked_rest = sorted(others, key=lambda x: jin_scores[x], reverse=True)
         ranked = [gold] + ranked_rest
@@ -1066,8 +1216,11 @@ def predict_jin_dan(
         reasons.append("方法三·斜连重打两边")
     if gold in zhong or gold in zhong_nb:
         reasons.append("方法四·重号加重号")
-    if not reasons:
-        reasons.append("口诀五法综合分最高")
+    reasons.append(
+        f"混合权重：口诀{int(FOLK_BLEND_WEIGHT*100)}%+算法{int(ALGO_BLEND_WEIGHT*100)}%"
+    )
+    if not any(r.startswith("方法") for r in reasons):
+        reasons.insert(0, "混合分最高")
 
     return {
         "jin_dan": gold,
@@ -1579,9 +1732,8 @@ def run_pipeline(
         else:
             review_block["jin_dan"] = None
 
-        # 口诀专选：复盘只记录口诀命中，不再调多因子权重
         adjust_notes = [
-            "复盘完成：下一期仍仅按口诀五法选号（不调其它模型权重）"
+            "复盘完成：下一期按口诀80%+辅助算法20%混合选号"
         ]
         if review_block.get("jin_dan"):
             jd = review_block["jin_dan"]
@@ -1649,21 +1801,37 @@ def run_pipeline(
         adjust_notes = notes
         review_block = db.load_latest_review(int(latest["period"]))
 
-    # 口诀专选：禁止多因子权重调参；仅回测口诀选10命中
-    adjust_notes.insert(0, "预测模式：仅口诀五法（禁止频率/遗漏/冷热/马尔可夫等其它算法）")
+    # 口诀主体80% + 辅助算法20%
+    blend_w = {
+        "folk": FOLK_BLEND_WEIGHT,
+        "algo": ALGO_BLEND_WEIGHT,
+        **{f"algo_{k}": ALGO_BLEND_WEIGHT * v for k, v in ALGO_ASSIST_SHARE.items()},
+    }
+    adjust_notes.insert(
+        0,
+        "预测模式：口诀五法主体80% + 辅助算法20%"
+        f"（遗漏{blend_w['algo_gap']*100:.0f}%/冷热{blend_w['algo_hotcold']*100:.0f}%/"
+        f"频率{blend_w['algo_freq']*100:.0f}%/区间{blend_w['algo_zone']*100:.0f}%/"
+        f"马尔可夫{blend_w['algo_markov']*100:.0f}%）",
+    )
     bt = backtest(
         draws,
         window=min(50, max(10, len(draws) - 15)),
         scheme="scheme4_folk_duplex11",
     )
     adjust_notes.append(
-        f"口诀选10近 {bt['window_size']} 期回测：平均命中 {bt['avg_hit']}"
+        f"混合选10近 {bt['window_size']} 期回测：平均命中 {bt['avg_hit']}"
     )
     db.save_backtest(bt, _now())
 
     analysis = build_analysis(draws, weights)
     groups = predict_groups(draws)
     folk_tips = groups.pop("folk_tips", None) or folk_tips_analysis(draws)["detail"]
+    blend_meta = groups.pop("blend_meta", None) or {
+        "folk_weight": FOLK_BLEND_WEIGHT,
+        "algo_weight": ALGO_BLEND_WEIGHT,
+        "algo_share": dict(ALGO_ASSIST_SHARE),
+    }
     jin_dan = predict_jin_dan(draws, groups=groups)
     jd_bt = backtest_jin_dan(draws, window=min(50, max(10, len(draws) - 15)))
     long_term = analyze_long_term(draws)
@@ -1684,24 +1852,23 @@ def run_pipeline(
         "jin_dan_detail": jin_dan,
         "folk_tips": folk_tips,
         "groups": {k: v for k, v in groups.items() if k != "core"},
-        "mode": "folk_koujue_only",
-        "weights": {"folk_only": 1.0},
+        "mode": "folk80_algo20",
+        "weights": blend_w,
+        "blend_meta": blend_meta,
     }
     save_last_prediction(pred_payload)
     for name, nums in groups.items():
         if not isinstance(nums, (list, tuple)):
             continue
-        db.save_prediction(
-            next_period, name, nums, {"folk_only": 1.0}, _now()
-        )
+        db.save_prediction(next_period, name, nums, blend_w, _now())
     db.save_prediction(
-        next_period, "jin_dan", [jin_dan["jin_dan"]], {"folk_only": 1.0}, _now()
+        next_period, "jin_dan", [jin_dan["jin_dan"]], blend_w, _now()
     )
     db.save_prediction(
         next_period,
         "dan_trio",
         [jin_dan["jin_dan"], jin_dan["yin_dan"], jin_dan["tong_dan"]],
-        {"folk_only": 1.0},
+        blend_w,
         _now(),
     )
 
@@ -1710,7 +1877,7 @@ def run_pipeline(
         analysis=analysis,
         groups=groups,
         long_term=long_term,
-        weights={"folk_only": 1.0},
+        weights=blend_w,
         adjust_notes=adjust_notes,
         review=review_block,
         backtest_result=bt,
@@ -1819,15 +1986,24 @@ def render_report(
     a("")
     a("━━━━━━━━━━━━")
     a("")
-    a("二、口诀模式说明：")
+    a("二、权重与模式说明：")
     a("调整内容：")
     for note in adjust_notes:
         a(f"  - {note}")
-    a("选号规则：仅方法一～五，无多因子权重")
+    a("选号规则：口诀五法主体80% + 辅助算法20%")
+    if isinstance(weights, dict) and weights.get("folk") is not None:
+        a("当前权重：")
+        a(f"  口诀五法：{float(weights.get('folk', FOLK_BLEND_WEIGHT))*100:.0f}%")
+        a(f"  辅助算法合计：{float(weights.get('algo', ALGO_BLEND_WEIGHT))*100:.0f}%")
+        a(f"    遗漏：{float(weights.get('algo_gap', 0))*100:.0f}%")
+        a(f"    冷热：{float(weights.get('algo_hotcold', 0))*100:.0f}%")
+        a(f"    频率：{float(weights.get('algo_freq', 0))*100:.0f}%")
+        a(f"    区间：{float(weights.get('algo_zone', 0))*100:.0f}%")
+        a(f"    马尔可夫：{float(weights.get('algo_markov', 0))*100:.0f}%")
     if backtest_result:
         a("")
         a(
-            f"口诀选10回测（近{backtest_result['window_size']}期，期望随机命中约 "
+            f"混合选10回测（近{backtest_result['window_size']}期，期望随机命中约 "
             f"{backtest_result.get('detail', {}).get('expected_random', 2.5)}）："
         )
         a(f"  平均命中：{backtest_result['avg_hit']}")
@@ -1884,7 +2060,8 @@ def render_report(
     a("方法三：斜连号，重打两边")
     a("方法四：重号加重号")
     a("方法五：跨度定胆（最大号减最小号）")
-    a("禁止其它算法；投注仅允许：1组选10复式11 + 1组选5复式6")
+    a("主体口诀80%；辅助算法20%（遗漏/冷热/频率/区间/马尔可夫）")
+    a("投注仅允许：1组选10复式11 + 1组选5复式6")
     a("")
     if folk_tips:
         a("【本期口诀落点】")
@@ -1908,7 +2085,7 @@ def render_report(
         a("")
     s4 = groups.get("scheme4_folk_duplex11") or []
     d56 = groups.get("duplex5_6") or []
-    a("【投注方案·纯口诀】")
+    a("【投注方案·口诀80%+算法20%】")
     a(f"选10复式11（C(11,10)=11注）：{fmt_nums(s4)}")
     a(f"选5复式6（C(6,5)=6注）：{fmt_nums(d56)}")
     a("")
@@ -1917,8 +2094,8 @@ def render_report(
     a("━━━━━━━━━━━━")
     a("")
     a("五、说明")
-    a(f"样本期数：{analysis['periods']}（历史仅供复盘与口诀落点推演）")
-    a("本期预测未使用频率/遗漏/冷热/区间/奇偶/连号/马尔可夫/随机优化等算法。")
+    a(f"样本期数：{analysis['periods']}")
+    a("选号以口诀五法为主体（约9/11与5/6名额），约2/11与1/6名额由辅助算法补强。")
     a("")
     a("━━━━━━━━━━━━")
     a("数据库位置：data/kl8/kl8.db")
