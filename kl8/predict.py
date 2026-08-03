@@ -23,6 +23,8 @@ POOL = 80
 DRAW_N = 20
 PICK_N = 10
 PICK_N5 = 5
+PICK_DUPLEX_5 = 6   # 选5复式6 → C(6,5)=6 注
+PICK_DUPLEX_10 = 11  # 选10复式11 → C(11,10)=11 注
 LONG_TERM = (2, 11, 14, 27, 39, 49, 54, 62, 69, 75)
 
 SCHEME_KEYS_10 = (
@@ -30,10 +32,15 @@ SCHEME_KEYS_10 = (
     "scheme2_am_hotcold",
     "scheme3_am_cold",
 )
+# 历史三组选5（复盘兼容）+ 新整合复式
 SCHEME_KEYS_5 = (
     "scheme1_anti_markov_5",
     "scheme2_am_hotcold_5",
     "scheme3_am_cold_5",
+)
+SCHEME_KEYS_DUPLEX = (
+    "duplex5_6",
+    "duplex10_11",
 )
 SCHEME_LABELS = {
     "scheme1_anti_markov": "方案1 反马尔可夫链（选10）",
@@ -42,6 +49,8 @@ SCHEME_LABELS = {
     "scheme1_anti_markov_5": "方案1 反马尔可夫链（选5）",
     "scheme2_am_hotcold_5": "方案2 反马尔可夫+热冷平衡（选5）",
     "scheme3_am_cold_5": "方案3 反马尔可夫+冷号回补（选5）",
+    "duplex5_6": "整合选5复式6",
+    "duplex10_11": "混合选10复式11",
 }
 
 DEFAULT_WEIGHTS = {
@@ -398,12 +407,53 @@ def _balance_pick(
     return sorted(chosen)
 
 
+def _merge_by_votes(
+    lists: Sequence[Sequence[int]],
+    scores: Dict[int, Dict[str, float]],
+    n: int,
+    filler: Optional[Sequence[int]] = None,
+) -> List[int]:
+    """多组号码按出现次数+综合分融合，取 n 个（用于复式）。"""
+    votes: Counter = Counter()
+    for lst in lists:
+        size = max(1, len(lst))
+        for i, num in enumerate(lst):
+            votes[int(num)] += 1.0 + 0.06 * (size - i)
+    ranked = sorted(
+        votes.keys(),
+        key=lambda x: (votes[x], scores.get(x, {}).get("total", 0.0)),
+        reverse=True,
+    )
+    out = list(ranked)
+    if filler:
+        for cand in filler:
+            if cand not in out:
+                out.append(int(cand))
+            if len(out) >= n:
+                break
+    if len(out) < n:
+        rest = sorted(
+            range(1, POOL + 1),
+            key=lambda x: scores.get(x, {}).get("total", 0.0),
+            reverse=True,
+        )
+        for cand in rest:
+            if cand not in out:
+                out.append(cand)
+            if len(out) >= n:
+                break
+    return sorted(out[:n])
+
+
 def predict_groups(
     draws: Sequence[Dict],
     weights: Optional[Dict[str, float]] = None,
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
-    """仅保留 3 组同型算法，各输出选10 + 选5。"""
+    """
+    3 组选10算法 + 一组选5复式6 + 一组混合选10复式11。
+    （内部仍先算三组选5，再整合为复式6。）
+    """
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
     am = anti_markov_scores(draws)
@@ -419,20 +469,36 @@ def predict_groups(
     }
     ranked_cb = sorted(cold_blend.keys(), key=lambda n: cold_blend[n], reverse=True)
 
-    # 选10
+    # 选10 · 三组
     scheme1 = _balance_pick(ranked_am, scores, PICK_N, max_zone=3)
     scheme2 = _balance_pick(ranked_blend, scores, PICK_N, max_zone=3)
     scheme3 = _balance_pick(ranked_cb, scores, PICK_N, max_zone=3)
-    # 选5（同算法，独立截取平衡）
+    # 内部三组选5 → 整合为选5复式6
     scheme1_5 = _balance_pick(ranked_am, scores, PICK_N5, max_zone=2)
     scheme2_5 = _balance_pick(ranked_blend, scores, PICK_N5, max_zone=2)
     scheme3_5 = _balance_pick(ranked_cb, scores, PICK_N5, max_zone=2)
+    duplex5 = _merge_by_votes(
+        [scheme1_5, scheme2_5, scheme3_5],
+        scores,
+        PICK_DUPLEX_5,
+        filler=ranked_blend,
+    )
+    # 混合选10复式11：覆盖三组差异化命中空间
+    duplex10 = _merge_by_votes(
+        [scheme1, scheme2, scheme3],
+        scores,
+        PICK_DUPLEX_10,
+        filler=ranked_blend,
+    )
 
     return {
         "core": scheme2,
         "scheme1_anti_markov": scheme1,
         "scheme2_am_hotcold": scheme2,
         "scheme3_am_cold": scheme3,
+        "duplex5_6": duplex5,
+        "duplex10_11": duplex10,
+        # 内部保留，供复盘对比/金胆共识（报告主输出不再单列三组选5）
         "scheme1_anti_markov_5": scheme1_5,
         "scheme2_am_hotcold_5": scheme2_5,
         "scheme3_am_cold_5": scheme3_5,
@@ -692,15 +758,51 @@ def review_all_schemes(
 ) -> Dict:
     """复盘全部保留方案；主复盘用 primary_key。"""
     details = {}
-    for key in list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5):
+    review_keys = list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5) + list(SCHEME_KEYS_DUPLEX)
+    for key in review_keys:
         nums = groups.get(key)
         if not nums:
             continue
         details[key] = review_prediction(draw_numbers, nums, draws_before)
+
+    # 三组选10是否打出不同命中号（互补）→ 支持混合复式
+    hit_sets = []
+    for key in SCHEME_KEYS_10:
+        if key in details:
+            hit_sets.append(set(details[key]["hits"]))
+    union_hits = set().union(*hit_sets) if hit_sets else set()
+    unique_only = []
+    if len(hit_sets) >= 2:
+        for i, hs in enumerate(hit_sets):
+            others = set().union(*(hit_sets[j] for j in range(len(hit_sets)) if j != i))
+            only = hs - others
+            if only:
+                unique_only.append((SCHEME_KEYS_10[i], sorted(only)))
+    max_single = max((len(hs) for hs in hit_sets), default=0)
+    complementary = bool(unique_only) or (len(union_hits) > max_single)
+
     primary_nums = groups.get(primary_key) or groups.get("scheme1_anti_markov") or []
     primary = review_prediction(draw_numbers, primary_nums, draws_before)
     primary["scheme_details"] = details
     primary["scheme_key"] = primary_key
+    if complementary:
+        note = (
+            f"三组打出不同命中号，并集 {len(union_hits)} 个"
+            f"（单组最高 {max_single}）："
+            f"{fmt_nums(sorted(union_hits)) if union_hits else '无'}；"
+            "已提供混合选10复式11覆盖并集"
+        )
+    else:
+        note = "三组命中重叠为主，复式仍作覆盖补充"
+    primary["complementary"] = {
+        "enabled": complementary,
+        "union_hits": sorted(union_hits),
+        "union_count": len(union_hits),
+        "unique_by_scheme": [
+            {"scheme": SCHEME_LABELS.get(k, k), "hits": v} for k, v in unique_only
+        ],
+        "note": note,
+    }
     return primary
 
 
@@ -894,12 +996,48 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
 
     # 复盘：仅当存在「针对最新已开奖期」的预测时才对比
     if last_pred and int(last_pred.get("target_period", -1)) == int(latest["period"]):
-        prev_groups = last_pred.get("groups") or {}
+        prev_groups = dict(last_pred.get("groups") or {})
         if "scheme2_am_hotcold" not in prev_groups and last_pred.get("numbers"):
-            prev_groups = {
-                **prev_groups,
-                "scheme2_am_hotcold": last_pred["numbers"],
-            }
+            prev_groups["scheme2_am_hotcold"] = last_pred["numbers"]
+        # 若上期只有三组选5/选10、尚无复式，按同样规则事后整合以便复盘
+        if "duplex5_6" not in prev_groups:
+            s5 = [
+                prev_groups[k]
+                for k in SCHEME_KEYS_5
+                if k in prev_groups and prev_groups[k]
+            ]
+            if s5:
+                # 简单并集后按出现次数截取 6 个
+                votes: Counter = Counter()
+                for lst in s5:
+                    for n in lst:
+                        votes[int(n)] += 1
+                prev_groups["duplex5_6"] = sorted(
+                    [n for n, _ in votes.most_common(PICK_DUPLEX_5)]
+                )
+        if "duplex10_11" not in prev_groups:
+            s10 = [
+                prev_groups[k]
+                for k in SCHEME_KEYS_10
+                if k in prev_groups and prev_groups[k]
+            ]
+            if s10:
+                votes = Counter()
+                for lst in s10:
+                    for n in lst:
+                        votes[int(n)] += 1
+                ranked = [n for n, _ in votes.most_common()]
+                # 不足 11 则按方案2顺序补
+                fill = prev_groups.get("scheme2_am_hotcold") or []
+                for n in fill:
+                    if n not in ranked:
+                        ranked.append(int(n))
+                # 仍不足则用三组并集排序
+                for lst in s10:
+                    for n in lst:
+                        if int(n) not in ranked:
+                            ranked.append(int(n))
+                prev_groups["duplex10_11"] = sorted(ranked[:PICK_DUPLEX_10])
         review_block = review_all_schemes(
             latest["numbers"], prev_groups, draws[:-1], primary_key="scheme2_am_hotcold"
         )
@@ -945,6 +1083,8 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
                 f"上期表现最好：{SCHEME_LABELS.get(best_key, best_key)} "
                 f"({review_block['scheme_details'][best_key]['hit_rate']})"
             )
+        if review_block.get("complementary"):
+            adjust_notes.append(review_block["complementary"]["note"])
         weights = save_weights(weights)
         db.save_review(
             period=latest["period"],
@@ -1083,13 +1223,21 @@ def render_report(
         details = review.get("scheme_details") or {}
         if details:
             a("各组命中：")
-            for key in list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5):
+            for key in list(SCHEME_KEYS_10) + list(SCHEME_KEYS_5) + list(SCHEME_KEYS_DUPLEX):
                 if key not in details:
                     continue
                 d = details[key]
                 a(
                     f"  {SCHEME_LABELS.get(key, key)}：{d['hit_rate']} "
                     f"| 命中 {fmt_nums(d['hits']) if d['hits'] else '无'}"
+                )
+        comp = review.get("complementary") or {}
+        if comp:
+            a(f"互补分析：{comp.get('note', '')}")
+            for item in comp.get("unique_by_scheme") or []:
+                a(
+                    f"  {item['scheme']} 独有命中："
+                    f"{fmt_nums(item['hits']) if item['hits'] else '无'}"
                 )
         jd_rev = review.get("jin_dan")
         if jd_rev:
@@ -1185,13 +1333,19 @@ def render_report(
     a(f"方案2 反马尔可夫链+热冷平衡：{fmt_nums(groups['scheme2_am_hotcold'])}")
     a(f"方案3 反马尔可夫链+冷号回补：{fmt_nums(groups['scheme3_am_cold'])}")
     a("")
-    a("【选5 · 同型三组算法】")
-    a(f"方案1 反马尔可夫链：{fmt_nums(groups['scheme1_anti_markov_5'])}")
-    a(f"方案2 反马尔可夫链+热冷平衡：{fmt_nums(groups['scheme2_am_hotcold_5'])}")
-    a(f"方案3 反马尔可夫链+冷号回补：{fmt_nums(groups['scheme3_am_cold_5'])}")
+    a("【复式整合】")
+    a(
+        f"选5复式6（三组选5整合，C(6,5)=6注）："
+        f"{fmt_nums(groups['duplex5_6'])}"
+    )
+    a(
+        f"选10复式11（三组混合覆盖，C(11,10)=11注）："
+        f"{fmt_nums(groups['duplex10_11'])}"
+    )
+    a("说明：因三组常打出不同命中号，复式11用于扩大并集覆盖。")
     a("")
     a(f"推荐10个核心号码：{fmt_nums(groups['scheme2_am_hotcold'])}")
-    a(f"推荐5个核心号码：{fmt_nums(groups['scheme2_am_hotcold_5'])}")
+    a(f"推荐选5复式6：{fmt_nums(groups['duplex5_6'])}")
     a("")
     a("━━━━━━━━━━━━")
     a("")
