@@ -663,15 +663,16 @@ def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
     prev_set = set(draws[-2]["numbers"]) if len(draws) >= 2 else set()
     prev2_set = set(draws[-3]["numbers"]) if len(draws) >= 3 else set()
 
-    # 5) 跨度定胆：最大-最小
+    # 5) 跨度定胆：最大-最小（精确跨度优先，保持顺序不按号码大小重排）
     span = last[-1] - last[0]
     detail["span"] = span
-    span_cands = []
+    span_cands: List[int] = []
     for x in (span, span - 1, span + 1, 81 - span):
-        if 1 <= x <= POOL:
+        if 1 <= x <= POOL and x not in span_cands:
             span_cands.append(x)
-            scores[x] += 100
-    detail["span_dan"] = sorted(set(span_cands))
+            # 精确跨度分最高
+            scores[x] += 120 if x == span else 95
+    detail["span_dan"] = span_cands
 
     # 1) 空位口诀：看上期开奖号排序后的空隙
     san, si, liu = [], [], []
@@ -877,8 +878,14 @@ def pick_folk_koujue(
             got += 1
 
     for name, nums, k, allow_last in quotas:
-        # 空位口诀保持 三空→四空→六空 优先级，不按号码大小重排
-        _take(name, nums, k, allow_last, keep_order=(name == "空位口诀"))
+        # 跨度定胆/空位口诀保持口诀优先级，不按号码大小重排
+        _take(
+            name,
+            nums,
+            k,
+            allow_last,
+            keep_order=(name in ("跨度定胆", "空位口诀")),
+        )
 
     # 未满则按口诀综合分补齐（五法均可，重号可入选）
     score = {n: 0.0 for n in range(1, POOL + 1)}
@@ -1154,55 +1161,64 @@ def review_prediction(
     pred_numbers: Sequence[int],
     draws_before: Sequence[Dict],
 ) -> Dict:
+    """复盘：按口诀五法归因未中原因（不使用其它算法标签）。"""
     ds = set(int(x) for x in draw_numbers)
     ps = [int(x) for x in pred_numbers]
     pick_n = max(1, len(ps))
     hits = sorted(n for n in ps if n in ds)
-    gaps = current_gaps(draws_before) if draws_before else {}
-    freq_20 = appearance_counts(draws_before, 20) if draws_before else Counter()
     miss = [n for n in ps if n not in ds]
     expect = pick_n * DRAW_N / POOL  # 随机期望命中
 
+    folk = folk_tips_analysis(draws_before) if draws_before else {"detail": {}}
+    d: Dict = folk.get("detail") or {}  # type: ignore[assignment]
+    span_dan = set(int(x) for x in (d.get("span_dan") or []))
+    fengkou = set(int(x) for x in (d.get("fengkou") or []))
+    kong = set(
+        int(x)
+        for key in ("san_kong", "si_kong", "liu_kong")
+        for x in (d.get(key) or [])
+    )
+    xie = set(int(x) for x in (d.get("xie_bian") or d.get("xie_lian") or []))
+    zhong = set(int(x) for x in (d.get("zhong_hao") or []))
+    zhong_nb = set(int(x) for x in (d.get("zhong_nb") or []))
+
     reasons = {
-        "遗漏判断错误": 0,
-        "冷热判断错误": 0,
-        "区域分布错误": 0,
-        "奇偶比例错误": 0,
-        "大小比例错误": 0,
-        "连号遗漏错误": 0,
-        "模型权重错误": 0,
+        "方法一空位口诀偏差": 0,
+        "方法二封口号偏差": 0,
+        "方法三斜连偏差": 0,
+        "方法四重号偏差": 0,
+        "方法五跨度定胆偏差": 0,
+        "口诀覆盖不足": 0,
     }
-    # 启发式归因
     for n in miss:
-        g = gaps.get(n, 0)
-        if g <= 1:
-            reasons["遗漏判断错误"] += 1
-        if freq_20.get(n, 0) >= 6:
-            reasons["冷热判断错误"] += 1
-        elif freq_20.get(n, 0) <= 2 and g < 8:
-            reasons["冷热判断错误"] += 1
-    pred_zones = Counter(zone_of(n) for n in ps)
-    draw_zones = Counter(zone_of(n) for n in ds)
-    zone_tol = 2 if pick_n <= 5 else 4
-    if sum(abs(pred_zones[z] - draw_zones.get(z, 0) * pick_n / DRAW_N) for z in range(4)) > zone_tol:
-        reasons["区域分布错误"] += 2
-    pred_odd = sum(1 for n in ps if n % 2 == 1)
-    draw_odd = sum(1 for n in ds if n % 2 == 1)
-    if abs(pred_odd / pick_n - draw_odd / DRAW_N) > 0.2:
-        reasons["奇偶比例错误"] += 2
-    pred_big = sum(1 for n in ps if is_big(n))
-    draw_big = sum(1 for n in ds if is_big(n))
-    if abs(pred_big / pick_n - draw_big / DRAW_N) > 0.2:
-        reasons["大小比例错误"] += 2
-    if abs(consecutive_pairs(ps) - consecutive_pairs(ds) * pick_n / DRAW_N) > 1.5:
-        reasons["连号遗漏错误"] += 2
+        tagged = False
+        if n in kong:
+            reasons["方法一空位口诀偏差"] += 1
+            tagged = True
+        if n in fengkou:
+            reasons["方法二封口号偏差"] += 1
+            tagged = True
+        if n in xie:
+            reasons["方法三斜连偏差"] += 1
+            tagged = True
+        if n in zhong or n in zhong_nb:
+            reasons["方法四重号偏差"] += 1
+            tagged = True
+        if n in span_dan:
+            reasons["方法五跨度定胆偏差"] += 1
+            tagged = True
+        if not tagged:
+            reasons["口诀覆盖不足"] += 1
+
+    # 开奖里口诀池命中了但未选入预测 → 覆盖不足
+    draw_folk_hits = (ds & (span_dan | fengkou | kong | xie | zhong | zhong_nb)) - set(ps)
+    if draw_folk_hits:
+        reasons["口诀覆盖不足"] += min(3, len(draw_folk_hits))
     if len(hits) <= max(1, int(expect - 0.5)):
-        reasons["模型权重错误"] += 3
-    elif len(hits) == int(expect):
-        reasons["模型权重错误"] += 1
+        reasons["口诀覆盖不足"] += 1
 
     ranked_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)
-    primary = [k for k, v in ranked_reasons if v > 0][:4] or ["样本随机波动为主"]
+    primary = [k for k, v in ranked_reasons if v > 0][:4] or ["口诀随机波动为主"]
 
     return {
         "draw_numbers": sorted(ds),
