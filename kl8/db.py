@@ -233,6 +233,52 @@ def save_review(
     conn.close()
 
 
+def load_latest_review(period: int, db_path: Path = DB_PATH) -> Optional[Dict]:
+    """读取某期最近一次复盘记录，供报告在「等待下期开奖」时重放。"""
+    conn = init_db(connect(db_path))
+    row = conn.execute(
+        """
+        SELECT draw_numbers_json, pred_numbers_json, hits_json, hit_count,
+               fail_reasons_json, created_at
+        FROM reviews
+        WHERE period = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        [period],
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    fail = json.loads(row["fail_reasons_json"] or "{}")
+    pred = json.loads(row["pred_numbers_json"])
+    hits = json.loads(row["hits_json"])
+    schemes = fail.get("schemes") or {}
+    scheme_details = {}
+    for key, meta in schemes.items():
+        hr = meta.get("hit_rate") or ""
+        scheme_hits = meta.get("hits") or []
+        scheme_details[key] = {
+            "hits": scheme_hits,
+            "hit_count": len(scheme_hits),
+            "hit_rate": hr,
+        }
+    return {
+        "draw_numbers": json.loads(row["draw_numbers_json"]),
+        "pred_numbers": pred,
+        "hits": hits,
+        "hit_count": int(row["hit_count"]),
+        "hit_rate": f"{len(hits)}/{len(pred) if pred else 10}",
+        "fail_reasons": fail.get("reasons") or {},
+        "primary_reasons": fail.get("primary") or [],
+        "scheme_details": scheme_details,
+        "jin_dan": fail.get("jin_dan"),
+        "complementary": fail.get("complementary"),
+        "note": "（复盘已落库，本次为等待下期开奖时的报告重放）",
+        "created_at": row["created_at"],
+    }
+
+
 def save_weights(weights: Dict[str, float], updated_at: str, db_path: Path = DB_PATH) -> None:
     conn = init_db(connect(db_path))
     conn.execute(

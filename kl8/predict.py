@@ -31,7 +31,7 @@ SCHEME_KEYS_10 = (
     "scheme1_ensemble",
     "scheme2_gap_rhythm",
     "scheme3_cooc_hot",
-    "scheme4_pattern_hedge",
+    "scheme4_folk_koujue",
 )
 # 历史方案键（复盘兼容）
 SCHEME_KEYS_LEGACY = (
@@ -39,6 +39,7 @@ SCHEME_KEYS_LEGACY = (
     "scheme2_am_hotcold",
     "scheme3_markov",
     "scheme3_am_cold",
+    "scheme4_pattern_hedge",
     "scheme1_anti_markov_5",
     "scheme2_am_hotcold_5",
     "scheme3_am_cold_5",
@@ -59,7 +60,8 @@ SCHEME_LABELS = {
     "scheme1_ensemble": "方案1 多因子集成+技巧（选10）",
     "scheme2_gap_rhythm": "方案2 遗漏节奏/空位口诀（选10）",
     "scheme3_cooc_hot": "方案3 共现热/重号对称封口（选10）",
-    "scheme4_pattern_hedge": "方案4 形态均衡对冲（选10）",
+    "scheme4_folk_koujue": "方案4 口诀专选（选10）",
+    "scheme4_pattern_hedge": "方案4 形态均衡对冲（选10·旧）",
     "scheme1_anti_markov": "方案1 反马尔可夫链（选10·旧）",
     "scheme2_am_hotcold": "方案2 反马尔可夫+冷热（选10·旧）",
     "scheme3_markov": "方案3 马尔可夫链（选10·旧）",
@@ -728,6 +730,137 @@ def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
     return {"scores": norm, "detail": detail}
 
 
+def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
+    """
+    方案4：完全按民间口诀选 10 码（仅参考，不保证命中）。
+    方法一：三空打中间、四空打两边、六空以上打连子
+    方法二：封口号
+    方法三：斜连号，重打两边
+    方法四：重号加重号（重号本身可入选，邻号加强）
+    方法五：跨度定胆
+
+    五法按配额各取若干，避免空位口诀独占 10 码。
+    """
+    folk = folk_tips_analysis(draws)
+    d: Dict = folk["detail"]  # type: ignore[assignment]
+    last_set = set(int(x) for x in draws[-1]["numbers"]) if draws else set()
+    zhong_allow = set(int(x) for x in (d.get("zhong_hao") or []))
+
+    def _ok(n: int, allow_last: bool = False) -> bool:
+        if n < 1 or n > POOL:
+            return False
+        if n in last_set and not (allow_last or n in zhong_allow):
+            return False
+        return True
+
+    # 斜连「重打两边」候选：上期最小/最大 ±1/±10
+    xie_bian: List[int] = []
+    if draws:
+        last = sorted(int(x) for x in draws[-1]["numbers"])
+        for base in (last[0], last[-1]):
+            for delta in (-10, -1, 1, 10):
+                y = base + delta
+                if _ok(y):
+                    xie_bian.append(y)
+    xie_bian = sorted(set(xie_bian))
+
+    # 重号邻号（加重号）
+    zhong_nb: List[int] = []
+    for n in d.get("zhong_hao") or []:
+        for y in (int(n) - 1, int(n) + 1):
+            if _ok(y):
+                zhong_nb.append(y)
+    zhong_nb = sorted(set(zhong_nb))
+
+    # 空位口诀池（方法一）：三空 → 四空 → 六空
+    kong_pool: List[int] = []
+    for key in ("san_kong", "si_kong", "liu_kong"):
+        for n in d.get(key) or []:
+            n = int(n)
+            if _ok(n) and n not in kong_pool:
+                kong_pool.append(n)
+
+    # 五法配额（合计 10）：跨度2 + 空位3 + 封口2 + 斜连两边1 + 重号/邻号2
+    quotas: List[Tuple[str, List[int], int, bool]] = [
+        ("跨度定胆", list(d.get("span_dan") or []), 2, False),
+        ("空位口诀", kong_pool, 3, False),
+        ("封口号", list(d.get("fengkou") or []), 2, False),
+        ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False),
+        ("重号", list(d.get("zhong_hao") or []), 1, True),
+        ("重号邻号", zhong_nb, 1, False),
+    ]
+
+    chosen: List[int] = []
+    used_by: Dict[int, str] = {}
+
+    def _take(
+        name: str,
+        nums: List[int],
+        k: int,
+        allow_last: bool,
+        *,
+        keep_order: bool = False,
+    ) -> None:
+        if k <= 0:
+            return
+        seq = [int(x) for x in nums]
+        if not keep_order:
+            seq = sorted(seq)
+        got = 0
+        for n in seq:
+            if got >= k or len(chosen) >= PICK_N:
+                break
+            if n in chosen or not _ok(n, allow_last=allow_last):
+                continue
+            chosen.append(n)
+            used_by[n] = name
+            got += 1
+
+    for name, nums, k, allow_last in quotas:
+        # 空位口诀保持 三空→四空→六空 优先级，不按号码大小重排
+        _take(name, nums, k, allow_last, keep_order=(name == "空位口诀"))
+
+    # 未满则按口诀综合分补齐（五法均可，重号可入选）
+    score = {n: 0.0 for n in range(1, POOL + 1)}
+    for n in d.get("span_dan") or []:
+        if _ok(int(n)):
+            score[int(n)] += 100
+    for n in kong_pool:
+        score[n] += 90
+    for n in d.get("fengkou") or []:
+        if _ok(int(n)):
+            score[int(n)] += 78
+    for n in xie_bian:
+        score[n] += 74
+    for n in d.get("xie_lian") or []:
+        if _ok(int(n)):
+            score[int(n)] += 60
+    for n in d.get("zhong_hao") or []:
+        if _ok(int(n), allow_last=True):
+            score[int(n)] += 88
+    for n in zhong_nb:
+        score[n] += 80
+
+    ranked = sorted(
+        [n for n in range(1, POOL + 1) if score[n] > 0 and n not in chosen],
+        key=lambda n: (score[n], -n),
+        reverse=True,
+    )
+    for n in ranked:
+        if len(chosen) >= PICK_N:
+            break
+        chosen.append(n)
+        used_by.setdefault(n, "口诀补齐")
+
+    if len(chosen) < PICK_N:
+        for n in range(1, POOL + 1):
+            if n not in chosen and _ok(n):
+                chosen.append(n)
+            if len(chosen) >= PICK_N:
+                break
+    return sorted(chosen[:PICK_N])
+
+
 def predict_groups(
     draws: Sequence[Dict],
     weights: Optional[Dict[str, float]] = None,
@@ -827,54 +960,17 @@ def predict_groups(
     if overlap13 >= 6:
         scheme3 = _diversify(scheme3[:6], ranked3, set(scheme1) | set(scheme2))
 
-    # ---- 方案4：形态均衡对冲（替代原复式11）----
-    # 在高分池中做形态约束抽样，刻意降低与前三组重叠，补齐奇偶/大小/区间
-    avoid123 = set(scheme1) | set(scheme2) | set(scheme3)
-    hedge = {
-        n: (
-            0.30 * scores[n]["total"]
-            + 0.20 * scores[n]["oddeven_size"]
-            + 0.18 * scores[n]["zone"]
-            + 0.14 * folk_s[n]
-            + 0.10 * rhythm[n]
-            + 0.08 * am[n]
-        )
-        for n in range(1, POOL + 1)
-    }
-    for n in hedge:
-        if n in avoid123:
-            hedge[n] *= 0.72  # 对冲：降低与前三组重复
-        if n in last:
-            hedge[n] *= 0.88
-    ranked4 = sorted(hedge.keys(), key=lambda n: hedge[n], reverse=True)
-    # 蒙特卡洛形态优选
-    rng = random.Random(seed + 19)
-    pool4 = ranked4[:36]
-    best4 = None
-    best4_s = -1e9
-    for _ in range(600):
-        pick = sorted(rng.sample(pool4, PICK_N))
-        odd = sum(1 for x in pick if x % 2 == 1)
-        big = sum(1 for x in pick if is_big(x))
-        zones = len({zone_of(x) for x in pick})
-        cons = consecutive_pairs(pick)
-        overlap = len(set(pick) & avoid123)
-        s = sum(hedge[n] for n in pick)
-        s += (5 - abs(odd - 5)) * 6
-        s += (5 - abs(big - 5)) * 6
-        s += zones * 5
-        s += (2 - abs(cons - 2)) * 3
-        s -= overlap * 4  # 重叠惩罚
-        if s > best4_s:
-            best4_s = s
-            best4 = pick
-    scheme4 = best4 or _balance_pick(ranked4, scores, PICK_N, max_zone=3)
+    # ---- 方案4：完全按口诀选号（三空/四空/六空/封口/斜连/重号/跨度定胆）----
+    scheme4 = pick_folk_koujue_10(draws)
+    ranked4 = scheme4 + [
+        n for n in ranked1 if n not in scheme4
+    ]  # 供选5复式补充排序
 
     # 选5复式6：四组各取 Top5，投票整合为 6 码（C(6,5)=6注）
     pick5_1 = _balance_pick(ranked1, scores, PICK_N5, max_zone=2)
     pick5_2 = _balance_pick(ranked2, scores, PICK_N5, max_zone=2)
     pick5_3 = _balance_pick(ranked3, scores, PICK_N5, max_zone=2)
-    pick5_4 = _balance_pick(ranked4, scores, PICK_N5, max_zone=2)
+    pick5_4 = scheme4[:PICK_N5] if len(scheme4) >= PICK_N5 else scheme4
     duplex5 = _merge_by_votes(
         [pick5_1, pick5_2, pick5_3, pick5_4],
         scores,
@@ -888,7 +984,7 @@ def predict_groups(
         "scheme1_ensemble": scheme1,
         "scheme2_gap_rhythm": scheme2,
         "scheme3_cooc_hot": scheme3,
-        "scheme4_pattern_hedge": scheme4,
+        "scheme4_folk_koujue": scheme4,
         "duplex5_6": duplex5,
         "folk_tips": folk["detail"],
     }
@@ -1216,10 +1312,10 @@ def review_all_schemes(
             f"多组打出不同命中号，并集 {len(union_hits)} 个"
             f"（单组最高 {max_single}）："
             f"{fmt_nums(sorted(union_hits)) if union_hits else '无'}；"
-            "可用方案4对冲补齐差异命中"
+            "可用方案4口诀专选补齐差异命中"
         )
     else:
-        note = "各组命中重叠为主，方案4作形态对冲补充"
+        note = "各组命中重叠为主，方案4口诀专选作补充"
     primary["complementary"] = {
         "enabled": complementary,
         "union_hits": sorted(union_hits),
@@ -1548,11 +1644,14 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
             f"已有针对第 {last_pred.get('target_period')} 期的预测，"
             "等待该期开奖后再复盘；本次刷新分析与方案"
         ]
+        # 报告仍展示已落库的上期复盘，避免重复跑流水线后复盘区变空
+        review_block = db.load_latest_review(int(latest["period"]))
     elif last_pred:
         adjust_notes = [
             f"上一份预测目标期为 {last_pred.get('target_period')}，"
             f"最新开奖为 {latest['period']}，跳过无效复盘"
         ]
+        review_block = db.load_latest_review(int(latest["period"]))
 
     # 每累计 50 期回测并优化
     bt = None
@@ -1788,18 +1887,23 @@ def render_report(
         a(f"封口号：{fmt_nums(folk_tips.get('fengkou') or [])}")
         a(f"重号：{fmt_nums(folk_tips.get('zhong_hao') or []) or '无'}")
         a(f"对称号：{fmt_nums(folk_tips.get('dui_cheng') or [])}")
-        a("（斜连号已并入评分；技巧只加分，不单独包中）")
+        a("（方案1–3：技巧只加分；方案4：完全按口诀选号）")
         a("")
     a("【选10 · 四组预测】")
     a(f"方案1 多因子集成+技巧：{fmt_nums(groups['scheme1_ensemble'])}")
     a(f"方案2 遗漏节奏/空位口诀：{fmt_nums(groups['scheme2_gap_rhythm'])}")
     a(f"方案3 共现热/重号对称封口：{fmt_nums(groups['scheme3_cooc_hot'])}")
-    a(f"方案4 形态均衡对冲：{fmt_nums(groups['scheme4_pattern_hedge'])}")
+    s4 = groups.get("scheme4_folk_koujue") or groups.get("scheme4_pattern_hedge") or []
+    a(f"方案4 口诀专选：{fmt_nums(s4)}")
+    a(
+        "（方案4口诀：①三空中间/四空两边/六空连子 ②封口 "
+        "③斜连重打两边 ④重号加重号 ⑤跨度定胆）"
+    )
     a("")
     if groups.get("duplex5_6"):
         a("【复式】")
         a(
-            f"选5复式6（四组Top5整合，C(6,5)=6注）："
+            f"选5复式6（四组整合，C(6,5)=6注）："
             f"{fmt_nums(groups['duplex5_6'])}"
         )
         a("")
