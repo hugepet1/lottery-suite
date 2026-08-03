@@ -700,14 +700,132 @@ def gap_rhythm_scores(draws: Sequence[Dict]) -> Dict[int, float]:
     return scores
 
 
+def _draw_span(nums: Sequence[int]) -> int:
+    s = sorted(int(x) for x in nums)
+    return s[-1] - s[0]
+
+
+def _signals_from_draw(
+    nums: Sequence[int],
+    prev_nums: Optional[Sequence[int]] = None,
+) -> Dict[str, List[int]]:
+    """从单期开奖提取口诀五法信号（不含历史加权）。"""
+    last = sorted(int(x) for x in nums)
+    last_set = set(last)
+    prev_set = set(int(x) for x in prev_nums) if prev_nums else set()
+
+    span = last[-1] - last[0]
+    span_dan: List[int] = []
+    for x in (span, span - 1, span + 1, 81 - span):
+        if 1 <= x <= POOL and x not in span_dan:
+            span_dan.append(x)
+
+    san, si, liu = [], [], []
+    for a, b in zip(last, last[1:]):
+        empty = b - a - 1
+        if empty == 3:
+            mid = a + 2
+            if 1 <= mid <= POOL:
+                san.append(mid)
+        elif empty == 4:
+            for x in (a + 1, b - 1):
+                if 1 <= x <= POOL:
+                    si.append(x)
+        elif empty >= 6:
+            mids = list(range(a + 1, b))
+            if len(mids) >= 2:
+                c = len(mids) // 2
+                liu.extend(mids[max(0, c - 1) : c + 2])
+
+    fengkou = set()
+    for edge in (1, POOL, last[0] - 1, last[-1] + 1):
+        if 1 <= edge <= POOL and edge not in last_set:
+            fengkou.add(edge)
+    i = 0
+    while i < len(last):
+        j = i
+        while j + 1 < len(last) and last[j + 1] == last[j] + 1:
+            j += 1
+        for edge in (last[i] - 1, last[j] + 1):
+            if 1 <= edge <= POOL and edge not in last_set:
+                fengkou.add(edge)
+        i = j + 1
+
+    xie_bian: List[int] = []
+    xie: List[int] = []
+    for n in last:
+        for dlt in (-11, -10, -9, -1, 1, 9, 10, 11):
+            y = n + dlt
+            if 1 <= y <= POOL and y not in last_set:
+                xie.append(y)
+    for base in (last[0], last[-1]):
+        for dlt in (-10, -1, 1, 10):
+            y = base + dlt
+            if 1 <= y <= POOL and y not in last_set:
+                xie_bian.append(y)
+                xie.append(y)
+
+    zhong = sorted(last_set & prev_set)
+    zhong_nb: List[int] = []
+    for n in zhong:
+        for y in (n - 1, n + 1):
+            if 1 <= y <= POOL:
+                zhong_nb.append(y)
+
+    return {
+        "span_dan": span_dan,
+        "san_kong": sorted(set(san)),
+        "si_kong": sorted(set(si)),
+        "liu_kong": sorted(set(liu)),
+        "fengkou": sorted(fengkou),
+        "xie_bian": sorted(set(xie_bian)),
+        "xie_lian": sorted(set(xie))[:30],
+        "zhong_hao": zhong,
+        "zhong_nb": sorted(set(zhong_nb)),
+        "span": [span],
+    }
+
+
+def _koujue_hit_stats(
+    draws: Sequence[Dict],
+    window: int = 50,
+) -> Dict[str, Dict[int, List[int]]]:
+    """
+    回看历史：各口诀信号在「下一期」是否命中。
+    返回 method -> number -> [hits, trials]
+    """
+    stats: Dict[str, Dict[int, List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    if len(draws) < 3:
+        return stats
+    start = max(1, len(draws) - window)
+    for i in range(start, len(draws) - 1):
+        prev = draws[i - 1]["numbers"] if i >= 1 else None
+        sig = _signals_from_draw(draws[i]["numbers"], prev)
+        nxt = set(int(x) for x in draws[i + 1]["numbers"])
+        for key, nums in sig.items():
+            if key == "span":
+                continue
+            for n in nums:
+                n = int(n)
+                if n < 1 or n > POOL:
+                    continue
+                st = stats[key][n]
+                st[1] += 1
+                if n in nxt:
+                    st[0] += 1
+    return stats
+
+
 def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
     """
-    快乐8民间选号技巧（仅五法，禁止其它算法参与评分）：
+    口诀五法（结合历史开奖走势与命中率推演）：
     1) 三空打中间、四空打两边、六空以上打连子
     2) 封口号
     3) 斜连号，重打两边
     4) 重号加重号
     5) 跨度定胆
+
+    候选仍属五法范畴；分数=当期口诀形态 + 近N期信号命中率 + 跨度/重号历史走势。
     """
     scores = {n: 0.0 for n in range(1, POOL + 1)}
     detail: Dict[str, object] = {
@@ -721,6 +839,8 @@ def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
         "xie_bian": [],
         "zhong_hao": [],
         "zhong_nb": [],
+        "hist_span_mode": [],
+        "method_hit_rate": {},
     }
     if not draws:
         return {"scores": scores, "detail": detail}
@@ -729,110 +849,186 @@ def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
     last_set = set(last)
     prev_set = set(draws[-2]["numbers"]) if len(draws) >= 2 else set()
     prev2_set = set(draws[-3]["numbers"]) if len(draws) >= 3 else set()
+    cur = _signals_from_draw(last, draws[-2]["numbers"] if len(draws) >= 2 else None)
+    hit_stats = _koujue_hit_stats(draws, window=min(60, max(20, len(draws) - 1)))
+    hist_bias = koujue_history_bias(draws)
 
-    # 5) 跨度定胆：最大-最小（精确跨度优先，保持顺序不按号码大小重排）
+    def _hit_rate(method: str, n: int) -> float:
+        h, t = hit_stats.get(method, {}).get(n, [0, 0])
+        if t <= 0:
+            return 0.22  # 接近随机单号期望 20/80
+        # 平滑
+        return (h + 1.0) / (t + 4.0)
+
+    def _boost(method: str, n: int, base: float) -> None:
+        rate = _hit_rate(method, n)
+        # 历史命中率越高，口诀分越高；并结合号码走势
+        scores[n] += base * (0.55 + 1.2 * rate) + 0.25 * hist_bias.get(n, 0.0)
+
+    # ---------- 5) 跨度定胆：上期跨度 + 近30期跨度众数/走势 ----------
     span = last[-1] - last[0]
     detail["span"] = span
-    span_cands: List[int] = []
-    for x in (span, span - 1, span + 1, 81 - span):
-        if 1 <= x <= POOL and x not in span_cands:
-            span_cands.append(x)
-            # 精确跨度分最高
-            scores[x] += 120 if x == span else 95
-    detail["span_dan"] = span_cands
+    recent_spans = [
+        _draw_span(d["numbers"]) for d in draws[-min(30, len(draws)) :]
+    ]
+    span_cnt = Counter(recent_spans)
+    mode_spans = [s for s, _ in span_cnt.most_common(3)]
+    detail["hist_span_mode"] = mode_spans
 
-    # 1) 空位口诀：看上期开奖号排序后的空隙
-    san, si, liu = [], [], []
-    for a, b in zip(last, last[1:]):
-        empty = b - a - 1  # 中间空号个数
-        if empty == 3:
-            mid = a + 2
-            if 1 <= mid <= POOL:
-                san.append(mid)
-                scores[mid] += 90
-        elif empty == 4:
-            left, right = a + 1, b - 1
-            for x in (left, right):
-                if 1 <= x <= POOL:
-                    si.append(x)
-                    scores[x] += 85
-        elif empty >= 6:
-            # 打连子：空隙内取中段相邻2-3码
-            start = a + 1
-            end = b - 1
-            mids = list(range(start, end + 1))
-            if len(mids) >= 2:
-                c = len(mids) // 2
-                for x in mids[max(0, c - 1) : c + 2]:
-                    liu.append(x)
-                    scores[x] += 80
-                    # 连子邻居再加点
-                    for y in (x - 1, x + 1):
-                        if start <= y <= end:
-                            scores[y] += 20
+    span_cands: List[int] = []
+    # 上期精确跨度优先，再并入历史高频跨度及其邻值
+    ordered_span_vals: List[int] = []
+    for s in [span, span - 1, span + 1, 81 - span] + mode_spans:
+        for x in (s, s - 1, s + 1):
+            if 1 <= x <= POOL and x not in ordered_span_vals:
+                ordered_span_vals.append(x)
+    for x in ordered_span_vals:
+        span_cands.append(x)
+        base = 130 if x == span else (100 if x in mode_spans else 85)
+        # 跨度走势：近期跨度抬升/回落，偏向对应胆码
+        if len(recent_spans) >= 5:
+            mid = sum(recent_spans[-5:]) / 5.0
+            if abs(x - mid) <= 3:
+                base += 15
+        _boost("span_dan", x, base)
+    # 精确跨度置顶
+    if span in span_cands:
+        span_cands = [span] + [x for x in span_cands if x != span]
+    detail["span_dan"] = span_cands[:8]
+
+    # ---------- 1) 空位口诀：当期形态 + 近10期同类信号命中增强 ----------
+    san = list(cur["san_kong"])
+    si = list(cur["si_kong"])
+    liu = list(cur["liu_kong"])
+    # 历史：近10期曾作为空位信号且命中率高的号，并入候选
+    for method, bucket, base in (
+        ("san_kong", san, 95),
+        ("si_kong", si, 90),
+        ("liu_kong", liu, 85),
+    ):
+        for n in list(bucket):
+            _boost(method, n, base)
+        # 从历史统计里补强高命中空位号（仍属口诀信号池）
+        ranked_hist = sorted(
+            hit_stats.get(method, {}).items(),
+            key=lambda kv: (kv[1][0] / max(1, kv[1][1]), kv[1][0]),
+            reverse=True,
+        )
+        for n, (h, t) in ranked_hist[:8]:
+            if t >= 3 and h / t >= 0.28 and n not in last_set:
+                if n not in bucket:
+                    bucket.append(n)
+                _boost(method, n, base * 0.55)
     detail["san_kong"] = sorted(set(san))
     detail["si_kong"] = sorted(set(si))
     detail["liu_kong"] = sorted(set(liu))
 
-    # 2) 封口号：簇边缘外沿、01/80、以及连号块两端外侧
-    fengkou = set()
-    # 整段封口
-    for edge in (1, POOL, last[0] - 1, last[-1] + 1):
-        if 1 <= edge <= POOL and edge not in last_set:
-            fengkou.add(edge)
-    # 连号块封口
-    i = 0
-    while i < len(last):
-        j = i
-        while j + 1 < len(last) and last[j + 1] == last[j] + 1:
-            j += 1
-        # [i..j] 是连号块（或单点）
-        lo, hi = last[i], last[j]
-        for edge in (lo - 1, hi + 1):
-            if 1 <= edge <= POOL and edge not in last_set:
-                fengkou.add(edge)
-        i = j + 1
-    for x in fengkou:
-        scores[x] += 70
-    detail["fengkou"] = sorted(fengkou)
+    # ---------- 2) 封口号：当期封口 + 历史封口命中率 ----------
+    fengkou = list(cur["fengkou"])
+    for n in fengkou:
+        _boost("fengkou", n, 75)
+    for n, (h, t) in sorted(
+        hit_stats.get("fengkou", {}).items(),
+        key=lambda kv: kv[1][0] / max(1, kv[1][1]),
+        reverse=True,
+    )[:12]:
+        if t >= 4 and h / t >= 0.30 and n not in last_set:
+            if n not in fengkou:
+                fengkou.append(n)
+            _boost("fengkou", n, 55)
+    detail["fengkou"] = sorted(set(fengkou))
 
-    # 3) 斜连号：±1/±9/±10/±11，重打两边（斜连两端）
-    xie = set()
+    # ---------- 3) 斜连：按历史跟随率给偏移加权 ----------
+    # 统计：上期出现 base 后，base+d 下期命中次数
+    follow = defaultdict(lambda: [0, 0])  # dlt -> [hit, trial]
+    if len(draws) >= 3:
+        for a, b in zip(draws[-41:-1], draws[-40:]):
+            aset = set(a["numbers"])
+            bset = set(b["numbers"])
+            for n in aset:
+                for dlt in (-11, -10, -9, -1, 1, 9, 10, 11):
+                    y = n + dlt
+                    if 1 <= y <= POOL:
+                        follow[dlt][1] += 1
+                        if y in bset:
+                            follow[dlt][0] += 1
+    best_dlts = sorted(
+        follow.keys(),
+        key=lambda d: follow[d][0] / max(1, follow[d][1]),
+        reverse=True,
+    )[:6] or [-10, -1, 1, 10]
+
     xie_bian: List[int] = []
+    xie: List[int] = []
     for n in last:
-        for d in (-11, -10, -9, -1, 1, 9, 10, 11):
-            y = n + d
+        for dlt in best_dlts:
+            y = n + dlt
             if 1 <= y <= POOL and y not in last_set:
-                xie.add(y)
-                scores[y] += 40
-    # 重打两边：上期最小/最大的斜连更加权
+                xie.append(y)
+                rate = follow[dlt][0] / max(1, follow[dlt][1]) if dlt in follow else 0.25
+                scores[y] += 35 + 80 * rate + 0.2 * hist_bias.get(y, 0.0)
     for base in (last[0], last[-1]):
-        for d in (-10, -1, 1, 10):
-            y = base + d
+        for dlt in (-10, -1, 1, 10):
+            y = base + dlt
             if 1 <= y <= POOL and y not in last_set:
-                scores[y] += 55
-                xie.add(y)
                 xie_bian.append(y)
-    detail["xie_lian"] = sorted(xie)[:24]
+                xie.append(y)
+                _boost("xie_bian", y, 70)
     detail["xie_bian"] = sorted(set(xie_bian))
+    detail["xie_lian"] = sorted(set(xie))[:24]
 
-    # 4) 重号加重号：上期重号，以及“重号的邻号/重号”
-    zhong = sorted(last_set & prev_set)
-    detail["zhong_hao"] = zhong
+    # ---------- 4) 重号：历史连开率高者优先 ----------
+    zhong = list(cur["zhong_hao"])
+    # 也纳入「上期号里历史连开率高」的潜在再重号
+    rehit = {}
+    if len(draws) >= 3:
+        for a, b in zip(draws[-51:-1], draws[-50:]):
+            aset = set(a["numbers"])
+            bset = set(b["numbers"])
+            for n in aset:
+                rehit.setdefault(n, [0, 0])
+                rehit[n][1] += 1
+                if n in bset:
+                    rehit[n][0] += 1
+    for n in last:
+        h, t = rehit.get(n, [0, 0])
+        rate = (h + 1) / (t + 4) if t else 0.2
+        if rate >= 0.28 and n not in zhong:
+            # 历史爱连开的上期号，作为潜在重号观察
+            zhong.append(n)
     zhong_nb: List[int] = []
     for n in zhong:
-        scores[n] += 75  # 可能再重
+        h, t = rehit.get(n, [0, 0])
+        rate = (h + 1) / (t + 4) if t else 0.25
+        scores[n] += 70 + 90 * rate + 0.2 * hist_bias.get(n, 0.0)
         for y in (n - 1, n + 1):
             if 1 <= y <= POOL:
-                scores[y] += 60
-                if y not in last_set or y in zhong:
-                    zhong_nb.append(y)
-    # 近两期都出现过的号再加
+                zhong_nb.append(y)
+                _boost("zhong_nb", y, 55)
     for n in last_set & prev_set & prev2_set:
-        scores[n] += 25
+        scores[n] += 30
+    detail["zhong_hao"] = sorted(set(zhong))
     detail["zhong_nb"] = sorted(set(zhong_nb))
 
-    # 归一到约 0-100（仅五法得分）
+    # 方法级命中率摘要（供报告）
+    method_rates = {}
+    for method in (
+        "span_dan",
+        "san_kong",
+        "si_kong",
+        "liu_kong",
+        "fengkou",
+        "xie_bian",
+        "zhong_hao",
+    ):
+        pairs = hit_stats.get(method, {})
+        if not pairs:
+            continue
+        hs = sum(v[0] for v in pairs.values())
+        ts = sum(v[1] for v in pairs.values())
+        method_rates[method] = round(hs / ts, 3) if ts else 0.0
+    detail["method_hit_rate"] = method_rates
+
     max_s = max(scores.values()) or 1.0
     min_s = min(scores.values())
     norm = {
@@ -1832,7 +2028,7 @@ def run_pipeline(
             review_block["jin_dan"] = None
 
         adjust_notes = [
-            "复盘完成：已取消辅助算法，下一期仅按口诀五法选号"
+            "复盘完成：下一期口诀五法继续按历史命中率与走势推演选号"
         ]
         if review_block.get("jin_dan"):
             jd = review_block["jin_dan"]
@@ -1904,7 +2100,7 @@ def run_pipeline(
     blend_w = {"folk": 1.0, "algo": 0.0}
     adjust_notes.insert(
         0,
-        "预测模式：仅口诀五法选号；五法池内参考历史中奖走势（遗漏回补/涨跌/不过热）",
+        "预测模式：口诀五法基于历史开奖推演（信号命中率/跨度众数/斜连跟随/重号连开率）",
     )
     bt = backtest(
         draws,
@@ -2082,11 +2278,11 @@ def render_report(
     a("调整内容：")
     for note in adjust_notes:
         a(f"  - {note}")
-    a("选号规则：口诀五法出候选；池内按历史走势排序（非独立算法选号）")
+    a("选号规则：口诀五法本身用历史数据推演（非仅看上期）")
     if isinstance(weights, dict) and weights.get("folk") is not None:
         a("当前权重：")
-        a(f"  口诀五法（候选）：{float(weights.get('folk', 1.0))*100:.0f}%")
-        a("  历史走势：用于五法池内排序（遗漏回补/近远趋势/过热抑制）")
+        a("  口诀五法：100%（形态+历史信号命中率+跨度/斜连/重号走势）")
+        a("  独立辅助算法：0%")
     if backtest_result:
         a("")
         a(
@@ -2147,11 +2343,13 @@ def render_report(
     a("方法三：斜连号，重打两边")
     a("方法四：重号加重号")
     a("方法五：跨度定胆（最大号减最小号）")
-    a("候选仅来自五法；排序参考历史开奖走势。投注：1组选10复式11 + 1组选5复式6")
+    a("口诀用历史命中率/走势推演；投注：1组选10复式11 + 1组选5复式6")
     a("")
     if folk_tips:
-        a("【本期口诀落点】")
-        a(f"上期跨度：{folk_tips.get('span')} → 跨度定胆候选 {fmt_nums(folk_tips.get('span_dan') or [])}")
+        a("【本期口诀落点·含历史推演】")
+        a(f"上期跨度：{folk_tips.get('span')} → 定胆候选 {fmt_nums(folk_tips.get('span_dan') or [])}")
+        if folk_tips.get("hist_span_mode"):
+            a(f"近30期高频跨度：{fmt_nums(folk_tips.get('hist_span_mode') or [])}")
         a(f"三空打中间：{fmt_nums(folk_tips.get('san_kong') or []) or '无'}")
         a(f"四空打两边：{fmt_nums(folk_tips.get('si_kong') or []) or '无'}")
         a(f"六空以上打连子：{fmt_nums(folk_tips.get('liu_kong') or []) or '无'}")
@@ -2166,8 +2364,14 @@ def render_report(
                 or "无"
             )
         )
-        a(f"重号：{fmt_nums(folk_tips.get('zhong_hao') or []) or '无'}")
+        a(f"重号（含历史连开倾向）：{fmt_nums(folk_tips.get('zhong_hao') or []) or '无'}")
         a(f"重号邻号：{fmt_nums(folk_tips.get('zhong_nb') or []) or '无'}")
+        mhr = folk_tips.get("method_hit_rate") or {}
+        if mhr:
+            a(
+                "历史口诀信号下期命中率："
+                + " ".join(f"{k}:{v}" for k, v in mhr.items())
+            )
         a("")
     s4 = groups.get("scheme4_folk_duplex11") or []
     d56 = groups.get("duplex5_6") or []
@@ -2181,7 +2385,7 @@ def render_report(
     a("")
     a("五、说明")
     a(f"样本期数：{analysis['periods']}")
-    a("候选号仅由口诀五法产生；历史走势只用于同池排序，不另开算法名额。")
+    a("口诀五法用近60期信号命中率、跨度众数、斜连跟随率、重号连开率推演，不另开其它算法。")
     a("")
     a("━━━━━━━━━━━━")
     a("数据库位置：data/kl8/kl8.db")

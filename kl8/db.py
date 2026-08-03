@@ -186,6 +186,30 @@ def load_draws(db_path: Path = DB_PATH) -> List[Dict]:
     return out
 
 
+def upsert_draw(
+    period: int,
+    numbers: Sequence[int],
+    draw_date: str = "",
+    db_path: Path = DB_PATH,
+) -> None:
+    """写入/更新单期开奖。"""
+    nums = sorted(int(x) for x in numbers)
+    if len(nums) != DRAW_COUNT or len(set(nums)) != DRAW_COUNT:
+        raise ValueError(f"开奖号码必须为 {DRAW_COUNT} 个不重复号码")
+    if any(n < 1 or n > POOL for n in nums):
+        raise ValueError("号码超出 01-80")
+    conn = init_db(connect(db_path))
+    cols = [f"n{i:02d}" for i in range(1, 21)]
+    placeholders = ", ".join(["?"] * (2 + 20 + 1))
+    col_sql = "period, draw_date, " + ", ".join(cols) + ", numbers_json"
+    conn.execute(
+        f"INSERT OR REPLACE INTO draws ({col_sql}) VALUES ({placeholders})",
+        [int(period), draw_date or "", *nums, json.dumps(nums)],
+    )
+    conn.commit()
+    conn.close()
+
+
 def save_prediction(
     target_period: int,
     scheme: str,
