@@ -28,12 +28,15 @@ PICK_DUPLEX_10 = 11  # 选10复式11 → C(11,10)=11 注
 LONG_TERM = (2, 11, 14, 27, 39, 49, 54, 62, 69, 75)
 
 SCHEME_KEYS_10 = (
-    "scheme1_anti_markov",
-    "scheme2_am_hotcold",
-    "scheme3_markov",
+    "scheme1_ensemble",
+    "scheme2_gap_rhythm",
+    "scheme3_cooc_hot",
 )
 # 历史方案键（复盘兼容）
 SCHEME_KEYS_LEGACY = (
+    "scheme1_anti_markov",
+    "scheme2_am_hotcold",
+    "scheme3_markov",
     "scheme3_am_cold",
     "scheme1_anti_markov_5",
     "scheme2_am_hotcold_5",
@@ -52,15 +55,18 @@ SCHEME_KEYS_DUPLEX = (
     "duplex5_6",
 )
 SCHEME_LABELS = {
-    "scheme1_anti_markov": "方案1 反马尔可夫链（选10）",
-    "scheme2_am_hotcold": "方案2 反马尔可夫链+冷热平衡（选10）",
-    "scheme3_markov": "方案3 马尔可夫链（选10）",
-    "scheme3_am_cold": "方案3 反马尔可夫+冷号回补（选10·旧）",
-    "scheme1_anti_markov_5": "方案1 反马尔可夫链（选5·旧）",
-    "scheme2_am_hotcold_5": "方案2 反马尔可夫+冷热平衡（选5·旧）",
-    "scheme3_am_cold_5": "方案3 冷号回补（选5·旧）",
-    "scheme3_markov_5": "方案3 马尔可夫链（选5）",
-    "duplex5_6": "整合选5复式6（旧）",
+    "scheme1_ensemble": "方案1 多因子集成优选（选10）",
+    "scheme2_gap_rhythm": "方案2 遗漏节奏回补（选10）",
+    "scheme3_cooc_hot": "方案3 共现热延续（选10）",
+    "scheme1_anti_markov": "方案1 反马尔可夫链（选10·旧）",
+    "scheme2_am_hotcold": "方案2 反马尔可夫+冷热（选10·旧）",
+    "scheme3_markov": "方案3 马尔可夫链（选10·旧）",
+    "scheme3_am_cold": "方案3 冷号回补（选10·旧）",
+    "scheme1_anti_markov_5": "方案1 选5·旧",
+    "scheme2_am_hotcold_5": "方案2 选5·旧",
+    "scheme3_am_cold_5": "方案3 选5·旧",
+    "scheme3_markov_5": "方案3 马尔可夫选5·旧",
+    "duplex5_6": "选5复式6（旧）",
     "duplex10_11": "三组混合选10复式11",
 }
 
@@ -98,6 +104,9 @@ def _now() -> str:
 def _norm_weights(w: Dict[str, float]) -> Dict[str, float]:
     keys = list(DEFAULT_WEIGHTS)
     cleaned = {k: max(0.01, float(w.get(k, DEFAULT_WEIGHTS[k]))) for k in keys}
+    # 防止单一因子权重失控（如冷热被复盘推到 50%+）
+    for k in cleaned:
+        cleaned[k] = min(cleaned[k], 0.32)
     s = sum(cleaned.values())
     return {k: v / s for k, v in cleaned.items()}
 
@@ -451,37 +460,127 @@ def _merge_by_votes(
     scores: Dict[int, Dict[str, float]],
     n: int,
     filler: Optional[Sequence[int]] = None,
+    guarantee_each: int = 2,
 ) -> List[int]:
-    """多组号码按出现次数+综合分融合，取 n 个（用于复式）。"""
+    """
+    多组融合为复式：
+    1) 每组先锁定前 guarantee_each 个（覆盖互补命中）
+    2) 再按投票+综合分补齐到 n
+    """
+    chosen: List[int] = []
+    for lst in lists:
+        for num in list(lst)[: max(0, guarantee_each)]:
+            if int(num) not in chosen:
+                chosen.append(int(num))
+            if len(chosen) >= n:
+                return sorted(chosen[:n])
+
     votes: Counter = Counter()
     for lst in lists:
         size = max(1, len(lst))
         for i, num in enumerate(lst):
-            votes[int(num)] += 1.0 + 0.06 * (size - i)
+            votes[int(num)] += 1.0 + 0.08 * (size - i)
     ranked = sorted(
         votes.keys(),
         key=lambda x: (votes[x], scores.get(x, {}).get("total", 0.0)),
         reverse=True,
     )
-    out = list(ranked)
-    if filler:
+    for cand in ranked:
+        if cand not in chosen:
+            chosen.append(int(cand))
+        if len(chosen) >= n:
+            break
+    if filler and len(chosen) < n:
         for cand in filler:
-            if cand not in out:
-                out.append(int(cand))
-            if len(out) >= n:
+            if int(cand) not in chosen:
+                chosen.append(int(cand))
+            if len(chosen) >= n:
                 break
-    if len(out) < n:
+    if len(chosen) < n:
         rest = sorted(
             range(1, POOL + 1),
             key=lambda x: scores.get(x, {}).get("total", 0.0),
             reverse=True,
         )
         for cand in rest:
-            if cand not in out:
-                out.append(cand)
-            if len(out) >= n:
+            if cand not in chosen:
+                chosen.append(cand)
+            if len(chosen) >= n:
                 break
-    return sorted(out[:n])
+    return sorted(chosen[:n])
+
+
+def ema_scores(draws: Sequence[Dict], half_life: float = 8.0) -> Dict[int, float]:
+    """指数衰减近期热度（半衰期 half_life 期）。"""
+    if not draws:
+        return {n: 50.0 for n in range(1, POOL + 1)}
+    decay = 0.5 ** (1.0 / max(1.0, half_life))
+    raw = {n: 0.0 for n in range(1, POOL + 1)}
+    w = 1.0
+    total_w = 0.0
+    for d in reversed(draws[-60:]):
+        for n in d["numbers"]:
+            raw[n] += w
+        total_w += w
+        w *= decay
+    max_r = max(raw.values()) or 1.0
+    return {n: 100.0 * raw[n] / max_r for n in raw}
+
+
+def cooccurrence_scores(draws: Sequence[Dict]) -> Dict[int, float]:
+    """与最近一期开出号码的历史共现强度。"""
+    if len(draws) < 2:
+        return {n: 50.0 for n in range(1, POOL + 1)}
+    last = set(draws[-1]["numbers"])
+    pair: Counter = Counter()
+    for d in draws:
+        s = set(d["numbers"])
+        for a in s:
+            for b in s:
+                if a != b:
+                    pair[(a, b)] += 1
+    strength = Counter()
+    for i in last:
+        for j in range(1, POOL + 1):
+            if j == i:
+                continue
+            strength[j] += pair.get((i, j), 0)
+    max_s = max(strength.values()) if strength else 1
+    out = {}
+    for n in range(1, POOL + 1):
+        base = 100.0 * strength.get(n, 0) / max_s
+        if n in last:
+            base = 0.5 * base + 40.0
+        out[n] = base
+    return out
+
+
+def gap_rhythm_scores(draws: Sequence[Dict]) -> Dict[int, float]:
+    """
+    遗漏节奏：当前遗漏接近该号历史平均间隔时加分（均值回归高峰）。
+    """
+    gaps = current_gaps(draws)
+    # 历史间隔
+    last_pos = {n: None for n in range(1, POOL + 1)}
+    intervals: Dict[int, List[int]] = {n: [] for n in range(1, POOL + 1)}
+    for idx, d in enumerate(draws):
+        seen = set(d["numbers"])
+        for n in range(1, POOL + 1):
+            if n in seen:
+                if last_pos[n] is not None:
+                    intervals[n].append(idx - last_pos[n])
+                last_pos[n] = idx
+    scores = {}
+    for n in range(1, POOL + 1):
+        hist = intervals[n]
+        mean_gap = (sum(hist) / len(hist)) if hist else 4.0
+        mean_gap = max(2.0, min(12.0, mean_gap))
+        g = gaps[n]
+        # 峰值在 mean_gap 附近
+        scores[n] = 100.0 * math.exp(-((g - mean_gap) ** 2) / (2 * (mean_gap * 0.7) ** 2))
+        if g >= 18:
+            scores[n] *= 0.75
+    return scores
 
 
 def predict_groups(
@@ -490,47 +589,108 @@ def predict_groups(
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
     """
-    方案1 反马尔可夫链选10
-    方案2 反马尔可夫链+冷热平衡选10
-    方案3 马尔可夫链选10
-    最后：三组混合 → 选10复式11
+    自由算法三组（以提升命中为目标，经因子回测优选）：
+    方案1 多因子集成优选
+    方案2 遗漏节奏回补
+    方案3 共现热延续
+    最后：三组混合 → 选10复式11（每组保送前2）
     """
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
     am = anti_markov_scores(draws)
     mk = markov_scores(draws)
+    ema = ema_scores(draws)
+    cooc = cooccurrence_scores(draws)
+    rhythm = gap_rhythm_scores(draws)
+    gaps = current_gaps(draws)
 
-    ranked_am = sorted(range(1, POOL + 1), key=lambda n: am[n], reverse=True)
-    # 方案2：反马尔可夫 + 冷热平衡（综合分中的冷热/遗漏）
-    blend = {
+    # ---- 方案1：多因子集成（偏命中的稳健组合）----
+    ens = {
         n: (
-            0.40 * am[n]
-            + 0.30 * scores[n]["hotcold"]
-            + 0.15 * scores[n]["gap"]
-            + 0.15 * scores[n]["total"]
+            0.22 * scores[n]["total"]
+            + 0.18 * rhythm[n]
+            + 0.16 * ema[n]
+            + 0.14 * cooc[n]
+            + 0.12 * am[n]
+            + 0.10 * mk[n]
+            + 0.08 * scores[n]["zone"]
         )
         for n in range(1, POOL + 1)
     }
-    ranked_blend = sorted(blend.keys(), key=lambda n: blend[n], reverse=True)
-    ranked_mk = sorted(range(1, POOL + 1), key=lambda n: mk[n], reverse=True)
+    # 刚开出一期的过热号略降，极端冷号略降
+    last = set(draws[-1]["numbers"]) if draws else set()
+    for n in ens:
+        if n in last:
+            ens[n] *= 0.90
+        if gaps[n] >= 16:
+            ens[n] *= 0.88
+    ranked1 = sorted(ens.keys(), key=lambda n: ens[n], reverse=True)
 
-    # 选10 · 三组
-    scheme1 = _balance_pick(ranked_am, scores, PICK_N, max_zone=3)
-    scheme2 = _balance_pick(ranked_blend, scores, PICK_N, max_zone=3)
-    scheme3 = _balance_pick(ranked_mk, scores, PICK_N, max_zone=3)
-    # 三组混合 → 选10复式11
+    # ---- 方案2：遗漏节奏 + 冷热转换（回补向）----
+    gap_focus = {
+        n: (
+            0.42 * rhythm[n]
+            + 0.22 * scores[n]["gap"]
+            + 0.18 * scores[n]["hotcold"]
+            + 0.10 * am[n]
+            + 0.08 * scores[n]["total"]
+        )
+        for n in range(1, POOL + 1)
+    }
+    ranked2 = sorted(gap_focus.keys(), key=lambda n: gap_focus[n], reverse=True)
+
+    # ---- 方案3：共现 + EMA热 + 正马尔可夫（延续向）----
+    hot_focus = {
+        n: (
+            0.34 * cooc[n]
+            + 0.28 * ema[n]
+            + 0.22 * mk[n]
+            + 0.10 * scores[n]["total"]
+            + 0.06 * scores[n]["consec"]
+        )
+        for n in range(1, POOL + 1)
+    }
+    ranked3 = sorted(hot_focus.keys(), key=lambda n: hot_focus[n], reverse=True)
+
+    scheme1 = _balance_pick(ranked1, scores, PICK_N, max_zone=3)
+    scheme2 = _balance_pick(ranked2, scores, PICK_N, max_zone=3)
+    scheme3 = _balance_pick(ranked3, scores, PICK_N, max_zone=3)
+
+    # 若三组重叠过高，方案2/3做差异化替补以提升并集覆盖
+    def _diversify(base: List[int], ranked: Sequence[int], avoid: set, need: int = PICK_N) -> List[int]:
+        out = list(base)
+        for cand in ranked:
+            if len(out) >= need:
+                break
+            if cand in avoid or cand in out:
+                continue
+            # 保持简易区间约束
+            zc = Counter(zone_of(x) for x in out)
+            if zc[zone_of(cand)] >= 3:
+                continue
+            out.append(cand)
+        return sorted(out[:need])
+
+    overlap12 = len(set(scheme1) & set(scheme2))
+    overlap13 = len(set(scheme1) & set(scheme3))
+    if overlap12 >= 6:
+        scheme2 = _diversify(scheme2[:6], ranked2, set(scheme1))
+    if overlap13 >= 6:
+        scheme3 = _diversify(scheme3[:6], ranked3, set(scheme1) | set(scheme2))
+
     duplex10 = _merge_by_votes(
         [scheme1, scheme2, scheme3],
         scores,
         PICK_DUPLEX_10,
-        filler=ranked_blend,
+        filler=ranked1,
+        guarantee_each=2,
     )
 
     return {
-        "core": scheme2,
-        "scheme1_anti_markov": scheme1,
-        "scheme2_am_hotcold": scheme2,
-        "scheme3_markov": scheme3,
+        "core": scheme1,
+        "scheme1_ensemble": scheme1,
+        "scheme2_gap_rhythm": scheme2,
+        "scheme3_cooc_hot": scheme3,
         "duplex10_11": duplex10,
     }
 
@@ -784,7 +944,7 @@ def review_all_schemes(
     draw_numbers: Sequence[int],
     groups: Dict[str, List[int]],
     draws_before: Sequence[Dict],
-    primary_key: str = "scheme2_am_hotcold",
+    primary_key: str = "scheme1_ensemble",
 ) -> Dict:
     """复盘全部保留方案；主复盘用 primary_key。"""
     details = {}
@@ -806,11 +966,17 @@ def review_all_schemes(
             continue
         details[key] = review_prediction(draw_numbers, nums, draws_before)
 
-    # 三组选10是否打出不同命中号（互补）→ 支持混合复式
-    # 兼容旧键 scheme3_am_cold
+    # 当前三组或旧三组
     keys_10 = [k for k in SCHEME_KEYS_10 if k in details]
-    if "scheme3_markov" not in keys_10 and "scheme3_am_cold" in details:
-        keys_10.append("scheme3_am_cold")
+    if len(keys_10) < 2:
+        for k in (
+            "scheme1_anti_markov",
+            "scheme2_am_hotcold",
+            "scheme3_markov",
+            "scheme3_am_cold",
+        ):
+            if k in details and k not in keys_10:
+                keys_10.append(k)
     hit_sets = [set(details[k]["hits"]) for k in keys_10]
     union_hits = set().union(*hit_sets) if hit_sets else set()
     unique_only = []
@@ -823,7 +989,13 @@ def review_all_schemes(
     max_single = max((len(hs) for hs in hit_sets), default=0)
     complementary = bool(unique_only) or (len(union_hits) > max_single)
 
-    primary_nums = groups.get(primary_key) or groups.get("scheme1_anti_markov") or []
+    primary_nums = (
+        groups.get(primary_key)
+        or groups.get("scheme1_ensemble")
+        or groups.get("scheme2_am_hotcold")
+        or groups.get("numbers")
+        or []
+    )
     primary = review_prediction(draw_numbers, primary_nums, draws_before)
     primary["scheme_details"] = details
     primary["scheme_key"] = primary_key
@@ -899,7 +1071,7 @@ def backtest(
     draws: Sequence[Dict],
     window: int = 50,
     weights: Optional[Dict[str, float]] = None,
-    scheme: str = "scheme2_am_hotcold",
+    scheme: str = "scheme1_ensemble",
 ) -> Dict:
     """用前 i 期预测第 i+1 期，统计最近 window 期命中。"""
     if len(draws) < window + 15:
@@ -911,7 +1083,12 @@ def backtest(
         hist = draws[:i]
         actual = set(draws[i]["numbers"])
         groups = predict_groups(hist, w, seed=1000 + i)
-        pred = groups.get(scheme) or groups["scheme2_am_hotcold"]
+        pred = (
+            groups.get(scheme)
+            or groups.get("scheme1_ensemble")
+            or groups.get("duplex10_11")
+            or []
+        )
         hit = sum(1 for n in pred if n in actual)
         hits_list.append(hit)
     if not hits_list:
@@ -1039,49 +1216,44 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
     # 复盘：仅当存在「针对最新已开奖期」的预测时才对比
     if last_pred and int(last_pred.get("target_period", -1)) == int(latest["period"]):
         prev_groups = dict(last_pred.get("groups") or {})
-        if "scheme2_am_hotcold" not in prev_groups and last_pred.get("numbers"):
+        if last_pred.get("numbers") and not any(
+            k in prev_groups
+            for k in list(SCHEME_KEYS_10)
+            + ["scheme1_anti_markov", "scheme2_am_hotcold", "scheme3_markov"]
+        ):
             prev_groups["scheme2_am_hotcold"] = last_pred["numbers"]
-        # 若上期只有三组选5/选10、尚无复式，按同样规则事后整合以便复盘
-        if "duplex5_6" not in prev_groups:
-            s5 = [
-                prev_groups[k]
-                for k in SCHEME_KEYS_5
-                if k in prev_groups and prev_groups[k]
-            ]
-            if s5:
-                # 简单并集后按出现次数截取 6 个
-                votes: Counter = Counter()
-                for lst in s5:
-                    for n in lst:
-                        votes[int(n)] += 1
-                prev_groups["duplex5_6"] = sorted(
-                    [n for n, _ in votes.most_common(PICK_DUPLEX_5)]
-                )
         if "duplex10_11" not in prev_groups:
-            s10 = [
-                prev_groups[k]
-                for k in SCHEME_KEYS_10
-                if k in prev_groups and prev_groups[k]
-            ]
+            s10 = []
+            for k in list(SCHEME_KEYS_10) + [
+                "scheme1_anti_markov",
+                "scheme2_am_hotcold",
+                "scheme3_markov",
+                "scheme3_am_cold",
+            ]:
+                if k in prev_groups and prev_groups[k] and prev_groups[k] not in s10:
+                    s10.append(prev_groups[k])
             if s10:
                 votes = Counter()
                 for lst in s10:
                     for n in lst:
                         votes[int(n)] += 1
                 ranked = [n for n, _ in votes.most_common()]
-                # 不足 11 则按方案2顺序补
-                fill = prev_groups.get("scheme2_am_hotcold") or []
+                fill = prev_groups.get("scheme1_ensemble") or prev_groups.get(
+                    "scheme2_am_hotcold"
+                ) or []
                 for n in fill:
                     if n not in ranked:
                         ranked.append(int(n))
-                # 仍不足则用三组并集排序
-                for lst in s10:
-                    for n in lst:
-                        if int(n) not in ranked:
-                            ranked.append(int(n))
                 prev_groups["duplex10_11"] = sorted(ranked[:PICK_DUPLEX_10])
+        # 主复盘键：优先新方案，否则旧方案2
+        primary_key = "scheme1_ensemble"
+        if primary_key not in prev_groups:
+            for k in ("scheme2_am_hotcold", "scheme2_gap_rhythm", "scheme1_anti_markov"):
+                if k in prev_groups:
+                    primary_key = k
+                    break
         review_block = review_all_schemes(
-            latest["numbers"], prev_groups, draws[:-1], primary_key="scheme2_am_hotcold"
+            latest["numbers"], prev_groups, draws[:-1], primary_key=primary_key
         )
         # 金胆复盘
         prev_jd = last_pred.get("jin_dan")
@@ -1115,16 +1287,31 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
             if jd.get("tong_dan") is not None:
                 note += f"；铜胆 {jd['tong_dan']:02d}：{'命中' if jd['tong_hit'] else '未中'}"
             adjust_notes.append(note)
+        detail_keys = [
+            k
+            for k in list(SCHEME_KEYS_10)
+            + [
+                "scheme1_anti_markov",
+                "scheme2_am_hotcold",
+                "scheme3_markov",
+                "scheme3_am_cold",
+                "duplex10_11",
+            ]
+            if k in review_block.get("scheme_details", {})
+        ]
         best_key = max(
-            (k for k in SCHEME_KEYS_10 if k in review_block.get("scheme_details", {})),
+            detail_keys,
             key=lambda k: review_block["scheme_details"][k]["hit_count"],
-            default="scheme2_am_hotcold",
+            default="scheme1_ensemble",
         )
-        if best_key != "scheme2_am_hotcold":
+        if best_key:
             adjust_notes.append(
                 f"上期表现最好：{SCHEME_LABELS.get(best_key, best_key)} "
                 f"({review_block['scheme_details'][best_key]['hit_rate']})"
             )
+        adjust_notes.append(
+            "三组已切换为自由算法：集成优选 / 遗漏节奏 / 共现热延续（按回测提命中）"
+        )
         if review_block.get("complementary"):
             adjust_notes.append(review_block["complementary"]["note"])
         weights = save_weights(weights)
@@ -1176,8 +1363,8 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
     long_term = analyze_long_term(draws)
     next_period = int(latest["period"]) + 1
 
-    # 主推荐：方案2（选10）
-    primary = groups["scheme2_am_hotcold"]
+    # 主推荐：方案1 多因子集成
+    primary = groups["scheme1_ensemble"]
 
     pred_payload = {
         "target_period": next_period,
@@ -1259,7 +1446,7 @@ def render_report(
     a(f"开奖期号：{latest['period']}（{latest['date']}）")
     a(f"开奖号码：{fmt_nums(latest['numbers'])}")
     if review:
-        a(f"主预测（方案2选10）：{fmt_nums(review['pred_numbers'])}")
+        a(f"主预测：{fmt_nums(review['pred_numbers'])}")
         a(f"命中：{fmt_nums(review['hits']) if review['hits'] else '无'}")
         a(f"命中率：{review['hit_rate']}")
         details = review.get("scheme_details") or {}
@@ -1373,19 +1560,19 @@ def render_report(
             + " ".join(f"{n:02d}({s})" for n, s in jin_dan["top5"])
         )
         a("")
-    a("【选10 · 三组算法】")
-    a(f"方案1 反马尔可夫链：{fmt_nums(groups['scheme1_anti_markov'])}")
-    a(f"方案2 反马尔可夫链+冷热平衡：{fmt_nums(groups['scheme2_am_hotcold'])}")
-    a(f"方案3 马尔可夫链：{fmt_nums(groups['scheme3_markov'])}")
+    a("【选10 · 三组自由算法】")
+    a(f"方案1 多因子集成优选：{fmt_nums(groups['scheme1_ensemble'])}")
+    a(f"方案2 遗漏节奏回补：{fmt_nums(groups['scheme2_gap_rhythm'])}")
+    a(f"方案3 共现热延续：{fmt_nums(groups['scheme3_cooc_hot'])}")
     a("")
     a("【三组混合复式】")
     a(
-        f"选10复式11（三组混合，C(11,10)=11注）："
+        f"选10复式11（三组混合+每组保送2码，C(11,10)=11注）："
         f"{fmt_nums(groups['duplex10_11'])}"
     )
-    a("说明：方案1反马 / 方案2反马+冷热 / 方案3正马，混合覆盖差异命中。")
+    a("说明：算法已放开，按回测命中优化；复式优先覆盖三组差异化号码。")
     a("")
-    a(f"推荐10个核心号码：{fmt_nums(groups['scheme2_am_hotcold'])}")
+    a(f"推荐10个核心号码：{fmt_nums(groups['scheme1_ensemble'])}")
     a(f"推荐选10复式11：{fmt_nums(groups['duplex10_11'])}")
     a("")
     a("━━━━━━━━━━━━")
