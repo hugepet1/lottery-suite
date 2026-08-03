@@ -1213,13 +1213,13 @@ def review_all_schemes(
     primary["scheme_key"] = primary_key
     if complementary:
         note = (
-            f"三组打出不同命中号，并集 {len(union_hits)} 个"
+            f"多组打出不同命中号，并集 {len(union_hits)} 个"
             f"（单组最高 {max_single}）："
             f"{fmt_nums(sorted(union_hits)) if union_hits else '无'}；"
-            "已提供混合选10复式11覆盖并集"
+            "可用方案4对冲补齐差异命中"
         )
     else:
-        note = "三组命中重叠为主，复式仍作覆盖补充"
+        note = "各组命中重叠为主，方案4作形态对冲补充"
     primary["complementary"] = {
         "enabled": complementary,
         "union_hits": sorted(union_hits),
