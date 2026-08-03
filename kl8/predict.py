@@ -31,7 +31,6 @@ SCHEME_KEYS_10 = (
     "scheme1_ensemble",
     "scheme2_gap_rhythm",
     "scheme3_cooc_hot",
-    "scheme4_folk_koujue",
 )
 # 历史方案键（复盘兼容）
 SCHEME_KEYS_LEGACY = (
@@ -39,6 +38,7 @@ SCHEME_KEYS_LEGACY = (
     "scheme2_am_hotcold",
     "scheme3_markov",
     "scheme3_am_cold",
+    "scheme4_folk_koujue",  # 旧：口诀选10；现为复式11
     "scheme4_pattern_hedge",
     "scheme1_anti_markov_5",
     "scheme2_am_hotcold_5",
@@ -53,14 +53,17 @@ SCHEME_KEYS_5 = (
     "scheme3_markov_5",
 )
 SCHEME_KEYS_DUPLEX = (
+    "scheme4_folk_duplex11",  # 口诀选10复式11
     "duplex5_6",
-    "duplex10_11",  # 旧
+    "scheme4_folk_koujue",  # 兼容旧键
+    "duplex10_11",
 )
 SCHEME_LABELS = {
     "scheme1_ensemble": "方案1 多因子集成+技巧（选10）",
     "scheme2_gap_rhythm": "方案2 遗漏节奏/空位口诀（选10）",
     "scheme3_cooc_hot": "方案3 共现热/重号对称封口（选10）",
-    "scheme4_folk_koujue": "方案4 口诀专选（选10）",
+    "scheme4_folk_duplex11": "方案4 口诀选10复式11",
+    "scheme4_folk_koujue": "方案4 口诀专选（选10·旧）",
     "scheme4_pattern_hedge": "方案4 形态均衡对冲（选10·旧）",
     "scheme1_anti_markov": "方案1 反马尔可夫链（选10·旧）",
     "scheme2_am_hotcold": "方案2 反马尔可夫+冷热（选10·旧）",
@@ -71,7 +74,7 @@ SCHEME_LABELS = {
     "scheme3_am_cold_5": "方案3 选5·旧",
     "scheme3_markov_5": "方案3 马尔可夫选5·旧",
     "duplex5_6": "选5复式6",
-    "duplex10_11": "选10复式11（旧）",
+    "duplex10_11": "选10复式11（旧混合）",
 }
 
 DEFAULT_WEIGHTS = {
@@ -730,17 +733,23 @@ def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
     return {"scores": norm, "detail": detail}
 
 
-def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
+def pick_folk_koujue(
+    draws: Sequence[Dict],
+    count: int = PICK_DUPLEX_10,
+) -> List[int]:
     """
-    方案4：完全按民间口诀选 10 码（仅参考，不保证命中）。
+    口诀方案：完全按民间口诀选号（仅参考，不保证命中）。
+    默认选 11 码 → 选10复式11（C(11,10)=11注）。
+
     方法一：三空打中间、四空打两边、六空以上打连子
     方法二：封口号
     方法三：斜连号，重打两边
     方法四：重号加重号（重号本身可入选，邻号加强）
     方法五：跨度定胆
 
-    五法按配额各取若干，避免空位口诀独占 10 码。
+    五法按配额各取若干，避免空位口诀独占全部名额。
     """
+    need = max(1, int(count))
     folk = folk_tips_analysis(draws)
     d: Dict = folk["detail"]  # type: ignore[assignment]
     last_set = set(int(x) for x in draws[-1]["numbers"]) if draws else set()
@@ -780,15 +789,25 @@ def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
             if _ok(n) and n not in kong_pool:
                 kong_pool.append(n)
 
-    # 五法配额（合计 10）：跨度2 + 空位3 + 封口2 + 斜连两边1 + 重号/邻号2
-    quotas: List[Tuple[str, List[int], int, bool]] = [
-        ("跨度定胆", list(d.get("span_dan") or []), 2, False),
-        ("空位口诀", kong_pool, 3, False),
-        ("封口号", list(d.get("fengkou") or []), 2, False),
-        ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False),
-        ("重号", list(d.get("zhong_hao") or []), 1, True),
-        ("重号邻号", zhong_nb, 1, False),
-    ]
+    # 五法配额：选10时合计10；选11时合计11（多给空位/斜连各1）
+    if need >= PICK_DUPLEX_10:
+        quotas: List[Tuple[str, List[int], int, bool]] = [
+            ("跨度定胆", list(d.get("span_dan") or []), 2, False),
+            ("空位口诀", kong_pool, 4, False),
+            ("封口号", list(d.get("fengkou") or []), 2, False),
+            ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False),
+            ("重号", list(d.get("zhong_hao") or []), 1, True),
+            ("重号邻号", zhong_nb, 1, False),
+        ]
+    else:
+        quotas = [
+            ("跨度定胆", list(d.get("span_dan") or []), 2, False),
+            ("空位口诀", kong_pool, 3, False),
+            ("封口号", list(d.get("fengkou") or []), 2, False),
+            ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False),
+            ("重号", list(d.get("zhong_hao") or []), 1, True),
+            ("重号邻号", zhong_nb, 1, False),
+        ]
 
     chosen: List[int] = []
     used_by: Dict[int, str] = {}
@@ -808,7 +827,7 @@ def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
             seq = sorted(seq)
         got = 0
         for n in seq:
-            if got >= k or len(chosen) >= PICK_N:
+            if got >= k or len(chosen) >= need:
                 break
             if n in chosen or not _ok(n, allow_last=allow_last):
                 continue
@@ -847,18 +866,23 @@ def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
         reverse=True,
     )
     for n in ranked:
-        if len(chosen) >= PICK_N:
+        if len(chosen) >= need:
             break
         chosen.append(n)
         used_by.setdefault(n, "口诀补齐")
 
-    if len(chosen) < PICK_N:
+    if len(chosen) < need:
         for n in range(1, POOL + 1):
             if n not in chosen and _ok(n):
                 chosen.append(n)
-            if len(chosen) >= PICK_N:
+            if len(chosen) >= need:
                 break
-    return sorted(chosen[:PICK_N])
+    return sorted(chosen[:need])
+
+
+def pick_folk_koujue_10(draws: Sequence[Dict]) -> List[int]:
+    """兼容旧接口：口诀选10。"""
+    return pick_folk_koujue(draws, count=PICK_N)
 
 
 def predict_groups(
@@ -867,11 +891,11 @@ def predict_groups(
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
     """
-    自由算法三组（提命中 + 民间技巧参考）：
+    自由算法三组选10 + 口诀选10复式11 + 选5复式6：
     方案1 多因子集成 + 技巧
     方案2 遗漏节奏 / 空位口诀
     方案3 共现热延续 / 重号对称封口
-    最后：三组混合 → 选10复式11（每组保送前2）
+    方案4 口诀五法 → 选10复式11
     """
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
@@ -960,17 +984,18 @@ def predict_groups(
     if overlap13 >= 6:
         scheme3 = _diversify(scheme3[:6], ranked3, set(scheme1) | set(scheme2))
 
-    # ---- 方案4：完全按口诀选号（三空/四空/六空/封口/斜连/重号/跨度定胆）----
-    scheme4 = pick_folk_koujue_10(draws)
-    ranked4 = scheme4 + [
-        n for n in ranked1 if n not in scheme4
-    ]  # 供选5复式补充排序
+    # ---- 方案4：口诀五法 → 选10复式11（C(11,10)=11注）----
+    scheme4_duplex = pick_folk_koujue(draws, count=PICK_DUPLEX_10)
 
-    # 选5复式6：四组各取 Top5，投票整合为 6 码（C(6,5)=6注）
+    # 选5复式6：三组选10各取 Top5 + 口诀复式前5，投票整合为 6 码
     pick5_1 = _balance_pick(ranked1, scores, PICK_N5, max_zone=2)
     pick5_2 = _balance_pick(ranked2, scores, PICK_N5, max_zone=2)
     pick5_3 = _balance_pick(ranked3, scores, PICK_N5, max_zone=2)
-    pick5_4 = scheme4[:PICK_N5] if len(scheme4) >= PICK_N5 else scheme4
+    pick5_4 = (
+        scheme4_duplex[:PICK_N5]
+        if len(scheme4_duplex) >= PICK_N5
+        else scheme4_duplex
+    )
     duplex5 = _merge_by_votes(
         [pick5_1, pick5_2, pick5_3, pick5_4],
         scores,
@@ -984,7 +1009,7 @@ def predict_groups(
         "scheme1_ensemble": scheme1,
         "scheme2_gap_rhythm": scheme2,
         "scheme3_cooc_hot": scheme3,
-        "scheme4_folk_koujue": scheme4,
+        "scheme4_folk_duplex11": scheme4_duplex,
         "duplex5_6": duplex5,
         "folk_tips": folk["detail"],
     }
@@ -1019,7 +1044,7 @@ def predict_jin_dan(
     for key, nums in groups.items():
         if key in ("core", "folk_tips") or not isinstance(nums, (list, tuple)):
             continue
-        weight = 1.2 if key == "duplex10_11" else 1.0
+        weight = 1.2 if key in ("scheme4_folk_duplex11", "duplex10_11") else 1.0
         for i, n in enumerate(sorted(nums, key=lambda x: -scores[x]["total"])):
             consensus[n] += weight * (1.0 + 0.08 * (len(nums) - i))
 
@@ -1312,10 +1337,10 @@ def review_all_schemes(
             f"多组打出不同命中号，并集 {len(union_hits)} 个"
             f"（单组最高 {max_single}）："
             f"{fmt_nums(sorted(union_hits)) if union_hits else '无'}；"
-            "可用方案4口诀专选补齐差异命中"
+            "可用口诀选10复式11补齐差异命中"
         )
     else:
-        note = "各组命中重叠为主，方案4口诀专选作补充"
+        note = "各组命中重叠为主，口诀选10复式11作补充"
     primary["complementary"] = {
         "enabled": complementary,
         "union_hits": sorted(union_hits),
@@ -1598,11 +1623,14 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         detail_keys = [
             k
             for k in list(SCHEME_KEYS_10)
+            + list(SCHEME_KEYS_DUPLEX)
             + [
                 "scheme1_anti_markov",
                 "scheme2_am_hotcold",
                 "scheme3_markov",
                 "scheme3_am_cold",
+                "scheme4_folk_koujue",
+                "scheme4_pattern_hedge",
                 "duplex10_11",
             ]
             if k in review_block.get("scheme_details", {})
@@ -1887,27 +1915,34 @@ def render_report(
         a(f"封口号：{fmt_nums(folk_tips.get('fengkou') or [])}")
         a(f"重号：{fmt_nums(folk_tips.get('zhong_hao') or []) or '无'}")
         a(f"对称号：{fmt_nums(folk_tips.get('dui_cheng') or [])}")
-        a("（方案1–3：技巧只加分；方案4：完全按口诀选号）")
+        a("（方案1–3：技巧只加分；方案4：口诀选10复式11）")
         a("")
-    a("【选10 · 四组预测】")
+    a("【选10 · 三组预测】")
     a(f"方案1 多因子集成+技巧：{fmt_nums(groups['scheme1_ensemble'])}")
     a(f"方案2 遗漏节奏/空位口诀：{fmt_nums(groups['scheme2_gap_rhythm'])}")
     a(f"方案3 共现热/重号对称封口：{fmt_nums(groups['scheme3_cooc_hot'])}")
-    s4 = groups.get("scheme4_folk_koujue") or groups.get("scheme4_pattern_hedge") or []
-    a(f"方案4 口诀专选：{fmt_nums(s4)}")
+    a("")
+    a("【复式】")
+    s4 = (
+        groups.get("scheme4_folk_duplex11")
+        or groups.get("scheme4_folk_koujue")
+        or groups.get("scheme4_pattern_hedge")
+        or []
+    )
+    a(f"方案4 口诀选10复式11（C(11,10)=11注）：{fmt_nums(s4)}")
     a(
-        "（方案4口诀：①三空中间/四空两边/六空连子 ②封口 "
+        "（口诀：①三空中间/四空两边/六空连子 ②封口 "
         "③斜连重打两边 ④重号加重号 ⑤跨度定胆）"
     )
-    a("")
     if groups.get("duplex5_6"):
-        a("【复式】")
         a(
-            f"选5复式6（四组整合，C(6,5)=6注）："
+            f"选5复式6（三组+口诀整合，C(6,5)=6注）："
             f"{fmt_nums(groups['duplex5_6'])}"
         )
-        a("")
+    a("")
     a(f"推荐10个核心号码：{fmt_nums(groups['scheme1_ensemble'])}")
+    if s4:
+        a(f"推荐口诀选10复式11：{fmt_nums(s4)}")
     if groups.get("duplex5_6"):
         a(f"推荐选5复式6：{fmt_nums(groups['duplex5_6'])}")
     a("")
