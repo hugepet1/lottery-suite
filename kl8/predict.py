@@ -249,6 +249,61 @@ def recent_trend(draws: Sequence[Dict], short: int = 10, long: int = 30) -> Dict
     return out
 
 
+def avg_gap_cycles(draws: Sequence[Dict]) -> Dict[int, float]:
+    """各号码历史平均间隔（期）。"""
+    last_pos = {n: -1 for n in range(1, POOL + 1)}
+    gaps_hist: Dict[int, List[int]] = defaultdict(list)
+    for idx, d in enumerate(draws):
+        for n in d["numbers"]:
+            if last_pos[n] >= 0:
+                gaps_hist[n].append(idx - last_pos[n])
+            last_pos[n] = idx
+    out: Dict[int, float] = {}
+    for n in range(1, POOL + 1):
+        xs = gaps_hist.get(n) or []
+        out[n] = sum(xs) / len(xs) if xs else 4.0  # 理论约 80/20=4
+    return out
+
+
+def koujue_history_bias(draws: Sequence[Dict]) -> Dict[int, float]:
+    """
+    口诀内部排序用的历史走势分（0-100）。
+    不产生候选号，只在五法池内比较：上涨趋势、遗漏回补、不过热。
+    """
+    if not draws:
+        return {n: 50.0 for n in range(1, POOL + 1)}
+    gaps = current_gaps(draws)
+    trend = recent_trend(draws, 10, 30)
+    freq20 = appearance_counts(draws, 20)
+    freq10 = appearance_counts(draws, 10)
+    avg_g = avg_gap_cycles(draws)
+    # 近20期热度中位，用于过热抑制
+    hot_vals = sorted(freq20.values()) if freq20 else [0]
+    hot_cut = hot_vals[max(0, len(hot_vals) * 3 // 4)] if hot_vals else 6
+
+    raw: Dict[int, float] = {}
+    for n in range(1, POOL + 1):
+        g = gaps[n]
+        ag = max(1.0, avg_g[n])
+        # 遗漏接近/略超历史均值 → 回补机会
+        due = math.exp(-((g - ag) ** 2) / (2 * (ag * 0.8) ** 2)) * 100.0
+        if g >= ag:
+            due += min(20.0, (g - ag) * 4.0)
+        # 上涨趋势
+        tr = 50.0 + max(-30.0, min(40.0, trend[n] * 400.0))
+        # 近10期温和活跃更好；过热扣分
+        f10 = freq10.get(n, 0)
+        f20 = freq20.get(n, 0)
+        mild = 70.0 - abs(f10 - 2.5) * 12.0
+        if f20 >= hot_cut + 2:
+            mild -= 25.0
+        # 刚开出且非重号观察：走势分略降（由口诀重号规则另行处理）
+        if g == 0:
+            mild -= 15.0
+        raw[n] = 0.40 * due + 0.35 * tr + 0.25 * max(0.0, mild)
+    return _normalize_score_map(raw)
+
+
 def zone_of(n: int) -> int:
     # 4 区：1-20 / 21-40 / 41-60 / 61-80
     return (n - 1) // 20
@@ -791,7 +846,7 @@ def pick_folk_koujue(
     count: int = PICK_DUPLEX_10,
 ) -> List[int]:
     """
-    口诀方案：完全按民间口诀选号（仅参考，不保证命中）。
+    口诀方案：候选仅来自民间五法；池内按历史中奖走势排序。
     默认选 11 码 → 选10复式11（C(11,10)=11注）。
 
     方法一：三空打中间、四空打两边、六空以上打连子
@@ -800,13 +855,17 @@ def pick_folk_koujue(
     方法四：重号加重号（重号本身可入选，邻号加强）
     方法五：跨度定胆
 
-    五法按配额各取若干，避免空位口诀独占全部名额。
+    五法按配额各取若干；同池内参考遗漏回补/涨跌趋势/不过热。
     """
     need = max(1, int(count))
     folk = folk_tips_analysis(draws)
     d: Dict = folk["detail"]  # type: ignore[assignment]
+    folk_s: Dict[int, float] = folk["scores"]  # type: ignore[assignment]
+    hist = koujue_history_bias(draws)
     last_set = set(int(x) for x in draws[-1]["numbers"]) if draws else set()
     zhong_allow = set(int(x) for x in (d.get("zhong_hao") or []))
+    span_dan = [int(x) for x in (d.get("span_dan") or [])]
+    exact_span = span_dan[0] if span_dan else None
 
     def _ok(n: int, allow_last: bool = False) -> bool:
         if n < 1 or n > POOL:
@@ -814,6 +873,10 @@ def pick_folk_koujue(
         if n in last_set and not (allow_last or n in zhong_allow):
             return False
         return True
+
+    def _rank_key(n: int) -> Tuple[float, float, int]:
+        # 历史走势为主，口诀分为辅（同池内比较）
+        return (0.55 * hist.get(n, 0.0) + 0.45 * folk_s.get(n, 0.0), hist.get(n, 0.0), -n)
 
     # 斜连「重打两边」候选：上期最小/最大 ±1/±10（仅方法三）
     xie_bian = [int(x) for x in (d.get("xie_bian") or []) if _ok(int(x))]
@@ -835,32 +898,33 @@ def pick_folk_koujue(
                     zhong_nb.append(y)
         zhong_nb = sorted(set(zhong_nb))
 
-    # 空位口诀池（方法一）：三空 → 四空 → 六空
+    # 空位口诀池（方法一）：三空 → 四空 → 六空，层内按走势排序
     kong_pool: List[int] = []
     for key in ("san_kong", "si_kong", "liu_kong"):
-        for n in d.get(key) or []:
-            n = int(n)
-            if _ok(n) and n not in kong_pool:
+        layer = [int(n) for n in (d.get(key) or []) if _ok(int(n))]
+        layer = sorted(set(layer), key=_rank_key, reverse=True)
+        for n in layer:
+            if n not in kong_pool:
                 kong_pool.append(n)
 
-    # 五法配额：选10时合计10；选11时合计11（多给空位/斜连各1）
+    # 五法配额
     if need >= PICK_DUPLEX_10:
-        quotas: List[Tuple[str, List[int], int, bool]] = [
-            ("跨度定胆", list(d.get("span_dan") or []), 2, False),
-            ("空位口诀", kong_pool, 4, False),
-            ("封口号", list(d.get("fengkou") or []), 2, False),
-            ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False),
-            ("重号", list(d.get("zhong_hao") or []), 1, True),
-            ("重号邻号", zhong_nb, 1, False),
+        quotas: List[Tuple[str, List[int], int, bool, str]] = [
+            ("跨度定胆", span_dan, 2, False, "span"),
+            ("空位口诀", kong_pool, 4, False, "keep"),
+            ("封口号", list(d.get("fengkou") or []), 2, False, "hist"),
+            ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False, "hist"),
+            ("重号", list(d.get("zhong_hao") or []), 1, True, "hist"),
+            ("重号邻号", zhong_nb, 1, False, "hist"),
         ]
     else:
         quotas = [
-            ("跨度定胆", list(d.get("span_dan") or []), 2, False),
-            ("空位口诀", kong_pool, 3, False),
-            ("封口号", list(d.get("fengkou") or []), 2, False),
-            ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False),
-            ("重号", list(d.get("zhong_hao") or []), 1, True),
-            ("重号邻号", zhong_nb, 1, False),
+            ("跨度定胆", span_dan, 2, False, "span"),
+            ("空位口诀", kong_pool, 3, False, "keep"),
+            ("封口号", list(d.get("fengkou") or []), 2, False, "hist"),
+            ("斜连两边", xie_bian or list(d.get("xie_lian") or []), 1, False, "hist"),
+            ("重号", list(d.get("zhong_hao") or []), 1, True, "hist"),
+            ("重号邻号", zhong_nb, 1, False, "hist"),
         ]
 
     chosen: List[int] = []
@@ -871,14 +935,21 @@ def pick_folk_koujue(
         nums: List[int],
         k: int,
         allow_last: bool,
-        *,
-        keep_order: bool = False,
+        mode: str,
     ) -> None:
         if k <= 0:
             return
         seq = [int(x) for x in nums]
-        if not keep_order:
-            seq = sorted(seq)
+        if mode == "span":
+            # 精确跨度优先，其余跨度候选按走势
+            if exact_span is not None and exact_span in seq:
+                seq = [exact_span] + [n for n in seq if n != exact_span]
+            rest = [n for n in seq if n != exact_span]
+            rest = sorted(rest, key=_rank_key, reverse=True)
+            seq = ([exact_span] if exact_span in seq else []) + rest
+        elif mode == "hist":
+            seq = sorted(seq, key=_rank_key, reverse=True)
+        # mode == keep：保持层内已按走势排好的空位顺序
         got = 0
         for n in seq:
             if got >= k or len(chosen) >= need:
@@ -889,21 +960,14 @@ def pick_folk_koujue(
             used_by[n] = name
             got += 1
 
-    for name, nums, k, allow_last in quotas:
-        # 跨度定胆/空位口诀保持口诀优先级，不按号码大小重排
-        _take(
-            name,
-            nums,
-            k,
-            allow_last,
-            keep_order=(name in ("跨度定胆", "空位口诀")),
-        )
+    for name, nums, k, allow_last, mode in quotas:
+        _take(name, nums, k, allow_last, mode)
 
-    # 未满则按口诀综合分补齐（五法均可，重号可入选）
+    # 未满：五法池内按「口诀分×走势」补齐
     score = {n: 0.0 for n in range(1, POOL + 1)}
-    for n in d.get("span_dan") or []:
-        if _ok(int(n)):
-            score[int(n)] += 100
+    for n in span_dan:
+        if _ok(n) or n == exact_span:
+            score[n] += 100
     for n in kong_pool:
         score[n] += 90
     for n in d.get("fengkou") or []:
@@ -922,19 +986,26 @@ def pick_folk_koujue(
 
     ranked = sorted(
         [n for n in range(1, POOL + 1) if score[n] > 0 and n not in chosen],
-        key=lambda n: (score[n], -n),
+        key=lambda n: (0.5 * score[n] + 0.5 * hist.get(n, 0.0), hist.get(n, 0.0), -n),
         reverse=True,
     )
     for n in ranked:
         if len(chosen) >= need:
             break
+        if not _ok(n, allow_last=(n in zhong_allow)):
+            continue
         chosen.append(n)
-        used_by.setdefault(n, "口诀补齐")
+        used_by.setdefault(n, "口诀+走势补齐")
 
     if len(chosen) < need:
-        for n in range(1, POOL + 1):
-            if n not in chosen and _ok(n):
-                chosen.append(n)
+        # 仍不足：五法池外不再扩展算法，只在全号池按走势+可入选补
+        rest = sorted(
+            [n for n in range(1, POOL + 1) if n not in chosen and _ok(n)],
+            key=lambda n: hist.get(n, 0.0),
+            reverse=True,
+        )
+        for n in rest:
+            chosen.append(n)
             if len(chosen) >= need:
                 break
     return sorted(chosen[:need])
@@ -1136,7 +1207,12 @@ def predict_groups(
                 [exact_span if n == weak5 else n for n in duplex5]
             )
 
-    folk_rank = sorted(duplex11, key=lambda n: folk_s.get(n, 0.0), reverse=True)
+    hist = koujue_history_bias(draws)
+    folk_rank = sorted(
+        duplex11,
+        key=lambda n: (0.55 * hist.get(n, 0.0) + 0.45 * folk_s.get(n, 0.0), -n),
+        reverse=True,
+    )
     core10 = sorted(folk_rank[:PICK_N])
 
     return {
@@ -1148,6 +1224,7 @@ def predict_groups(
             "folk_weight": 1.0,
             "algo_weight": 0.0,
             "algo_share": {},
+            "history_bias": True,
             "folk_slots": len(duplex11),
             "algo_slots": 0,
         },
@@ -1186,6 +1263,7 @@ def predict_jin_dan(
         for n in groups.get(key) or []:
             bet_pool.add(int(n))
 
+    hist = koujue_history_bias(draws)
     jin_scores: Dict[int, float] = {}
     for n in range(1, POOL + 1):
         s = float(folk_s.get(n, 0.0))
@@ -1207,6 +1285,8 @@ def predict_jin_dan(
             s += 10
         if n in bet_pool:
             s += 8
+        # 银铜参考历史走势；金胆仍以精确跨度为主
+        s += 0.35 * float(hist.get(n, 0.0))
         if n in last_set and n not in zhong and n not in span_dan:
             s *= 0.55
         jin_scores[n] = s
@@ -1237,8 +1317,9 @@ def predict_jin_dan(
         reasons.append("方法三·斜连重打两边")
     if gold in zhong or gold in zhong_nb:
         reasons.append("方法四·重号加重号")
-    if not reasons:
-        reasons.append("口诀五法综合分最高")
+    reasons.append("池内参考历史遗漏回补与涨跌走势")
+    if not any(r.startswith("方法") for r in reasons):
+        reasons.insert(0, "口诀五法综合分最高")
 
     return {
         "jin_dan": gold,
@@ -1821,7 +1902,10 @@ def run_pipeline(
 
     # 仅口诀五法（取消辅助算法）
     blend_w = {"folk": 1.0, "algo": 0.0}
-    adjust_notes.insert(0, "预测模式：仅口诀五法（已取消辅助算法）")
+    adjust_notes.insert(
+        0,
+        "预测模式：仅口诀五法选号；五法池内参考历史中奖走势（遗漏回补/涨跌/不过热）",
+    )
     bt = backtest(
         draws,
         window=min(50, max(10, len(draws) - 15)),
@@ -1998,11 +2082,11 @@ def render_report(
     a("调整内容：")
     for note in adjust_notes:
         a(f"  - {note}")
-    a("选号规则：仅口诀五法（已取消辅助算法）")
+    a("选号规则：口诀五法出候选；池内按历史走势排序（非独立算法选号）")
     if isinstance(weights, dict) and weights.get("folk") is not None:
         a("当前权重：")
-        a(f"  口诀五法：{float(weights.get('folk', 1.0))*100:.0f}%")
-        a(f"  辅助算法：{float(weights.get('algo', 0.0))*100:.0f}%")
+        a(f"  口诀五法（候选）：{float(weights.get('folk', 1.0))*100:.0f}%")
+        a("  历史走势：用于五法池内排序（遗漏回补/近远趋势/过热抑制）")
     if backtest_result:
         a("")
         a(
@@ -2063,7 +2147,7 @@ def render_report(
     a("方法三：斜连号，重打两边")
     a("方法四：重号加重号")
     a("方法五：跨度定胆（最大号减最小号）")
-    a("禁止其它算法；投注仅允许：1组选10复式11 + 1组选5复式6")
+    a("候选仅来自五法；排序参考历史开奖走势。投注：1组选10复式11 + 1组选5复式6")
     a("")
     if folk_tips:
         a("【本期口诀落点】")
@@ -2097,7 +2181,7 @@ def render_report(
     a("")
     a("五、说明")
     a(f"样本期数：{analysis['periods']}")
-    a("本期预测仅使用口诀五法，未使用频率/遗漏/冷热/区间/马尔可夫等辅助算法。")
+    a("候选号仅由口诀五法产生；历史走势只用于同池排序，不另开算法名额。")
     a("")
     a("━━━━━━━━━━━━")
     a("数据库位置：data/kl8/kl8.db")
