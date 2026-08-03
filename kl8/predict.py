@@ -55,9 +55,9 @@ SCHEME_KEYS_DUPLEX = (
     "duplex5_6",
 )
 SCHEME_LABELS = {
-    "scheme1_ensemble": "方案1 多因子集成优选（选10）",
-    "scheme2_gap_rhythm": "方案2 遗漏节奏回补（选10）",
-    "scheme3_cooc_hot": "方案3 共现热延续（选10）",
+    "scheme1_ensemble": "方案1 多因子集成+技巧（选10）",
+    "scheme2_gap_rhythm": "方案2 遗漏节奏/空位口诀（选10）",
+    "scheme3_cooc_hot": "方案3 共现热/重号对称封口（选10）",
     "scheme1_anti_markov": "方案1 反马尔可夫链（选10·旧）",
     "scheme2_am_hotcold": "方案2 反马尔可夫+冷热（选10·旧）",
     "scheme3_markov": "方案3 马尔可夫链（选10·旧）",
@@ -583,16 +583,159 @@ def gap_rhythm_scores(draws: Sequence[Dict]) -> Dict[int, float]:
     return scores
 
 
+def folk_tips_analysis(draws: Sequence[Dict]) -> Dict[str, object]:
+    """
+    快乐8民间选号技巧（仅作参考加分，不保证命中）：
+    1) 三空打中间、四空打两边、六空以上打连子
+    2) 封口号
+    3) 斜连号，重打两边
+    4) 重号加重号
+    5) 跨度定胆
+    6) 对称号
+    """
+    scores = {n: 40.0 for n in range(1, POOL + 1)}
+    detail: Dict[str, object] = {
+        "span": None,
+        "span_dan": [],
+        "fengkou": [],
+        "san_kong": [],
+        "si_kong": [],
+        "liu_kong": [],
+        "xie_lian": [],
+        "zhong_hao": [],
+        "dui_cheng": [],
+    }
+    if not draws:
+        return {"scores": scores, "detail": detail}
+
+    last = sorted(int(x) for x in draws[-1]["numbers"])
+    last_set = set(last)
+    prev_set = set(draws[-2]["numbers"]) if len(draws) >= 2 else set()
+    prev2_set = set(draws[-3]["numbers"]) if len(draws) >= 3 else set()
+
+    # 5) 跨度定胆：最大-最小
+    span = last[-1] - last[0]
+    detail["span"] = span
+    span_cands = []
+    for x in (span, span - 1, span + 1, 81 - span):
+        if 1 <= x <= POOL:
+            span_cands.append(x)
+            scores[x] += 18
+    detail["span_dan"] = sorted(set(span_cands))
+
+    # 1) 空位口诀：看上期开奖号排序后的空隙
+    san, si, liu = [], [], []
+    for a, b in zip(last, last[1:]):
+        empty = b - a - 1  # 中间空号个数
+        if empty == 3:
+            mid = a + 2
+            if 1 <= mid <= POOL:
+                san.append(mid)
+                scores[mid] += 22
+        elif empty == 4:
+            left, right = a + 1, b - 1
+            for x in (left, right):
+                if 1 <= x <= POOL:
+                    si.append(x)
+                    scores[x] += 18
+        elif empty >= 6:
+            # 打连子：空隙内取中段相邻2-3码
+            start = a + 1
+            end = b - 1
+            mids = list(range(start, end + 1))
+            if len(mids) >= 2:
+                c = len(mids) // 2
+                for x in mids[max(0, c - 1) : c + 2]:
+                    liu.append(x)
+                    scores[x] += 16
+                    # 连子邻居再加点
+                    for y in (x - 1, x + 1):
+                        if start <= y <= end:
+                            scores[y] += 6
+    detail["san_kong"] = sorted(set(san))
+    detail["si_kong"] = sorted(set(si))
+    detail["liu_kong"] = sorted(set(liu))
+
+    # 2) 封口号：簇边缘外沿、01/80、以及连号块两端外侧
+    fengkou = set()
+    # 整段封口
+    for edge in (1, POOL, last[0] - 1, last[-1] + 1):
+        if 1 <= edge <= POOL and edge not in last_set:
+            fengkou.add(edge)
+    # 连号块封口
+    i = 0
+    while i < len(last):
+        j = i
+        while j + 1 < len(last) and last[j + 1] == last[j] + 1:
+            j += 1
+        # [i..j] 是连号块（或单点）
+        lo, hi = last[i], last[j]
+        for edge in (lo - 1, hi + 1):
+            if 1 <= edge <= POOL and edge not in last_set:
+                fengkou.add(edge)
+        i = j + 1
+    for x in fengkou:
+        scores[x] += 14
+    detail["fengkou"] = sorted(fengkou)
+
+    # 3) 斜连号：±1/±9/±10/±11，重打两边（斜连两端）
+    xie = set()
+    for n in last:
+        for d in (-11, -10, -9, -1, 1, 9, 10, 11):
+            y = n + d
+            if 1 <= y <= POOL and y not in last_set:
+                xie.add(y)
+                scores[y] += 8
+    # 重打两边：上期最小/最大的斜连更加权
+    for base in (last[0], last[-1]):
+        for d in (-10, -1, 1, 10):
+            y = base + d
+            if 1 <= y <= POOL and y not in last_set:
+                scores[y] += 10
+                xie.add(y)
+    detail["xie_lian"] = sorted(xie)[:24]
+
+    # 4) 重号加重号：上期重号，以及“重号的邻号/重号”
+    zhong = sorted(last_set & prev_set)
+    detail["zhong_hao"] = zhong
+    for n in zhong:
+        scores[n] += 12  # 可能再重
+        for y in (n - 1, n + 1):
+            if 1 <= y <= POOL:
+                scores[y] += 9
+    # 近两期都出现过的号再加
+    for n in last_set & prev_set & prev2_set:
+        scores[n] += 8
+
+    # 6) 对称号：n ↔ 81-n
+    dui = []
+    for n in last:
+        m = 81 - n
+        if 1 <= m <= POOL and m not in last_set:
+            dui.append(m)
+            scores[m] += 15
+    # 对称夹击：若对称对一侧已开，另一侧加强
+    detail["dui_cheng"] = sorted(set(dui))
+
+    # 归一到约 0-100
+    max_s = max(scores.values()) or 1.0
+    min_s = min(scores.values())
+    norm = {
+        n: 100.0 * (scores[n] - min_s) / (max_s - min_s + 1e-9) for n in scores
+    }
+    return {"scores": norm, "detail": detail}
+
+
 def predict_groups(
     draws: Sequence[Dict],
     weights: Optional[Dict[str, float]] = None,
     seed: int = 2026,
 ) -> Dict[str, List[int]]:
     """
-    自由算法三组（以提升命中为目标，经因子回测优选）：
-    方案1 多因子集成优选
-    方案2 遗漏节奏回补
-    方案3 共现热延续
+    自由算法三组（提命中 + 民间技巧参考）：
+    方案1 多因子集成 + 技巧
+    方案2 遗漏节奏 / 空位口诀
+    方案3 共现热延续 / 重号对称封口
     最后：三组混合 → 选10复式11（每组保送前2）
     """
     w = _norm_weights(weights or load_weights())
@@ -602,22 +745,24 @@ def predict_groups(
     ema = ema_scores(draws)
     cooc = cooccurrence_scores(draws)
     rhythm = gap_rhythm_scores(draws)
+    folk = folk_tips_analysis(draws)
+    folk_s: Dict[int, float] = folk["scores"]  # type: ignore[assignment]
     gaps = current_gaps(draws)
 
-    # ---- 方案1：多因子集成（偏命中的稳健组合）----
+    # ---- 方案1：多因子集成 + 民间技巧 ----
     ens = {
         n: (
-            0.22 * scores[n]["total"]
-            + 0.18 * rhythm[n]
-            + 0.16 * ema[n]
-            + 0.14 * cooc[n]
-            + 0.12 * am[n]
+            0.18 * scores[n]["total"]
+            + 0.14 * rhythm[n]
+            + 0.14 * folk_s[n]
+            + 0.14 * ema[n]
+            + 0.12 * cooc[n]
+            + 0.10 * am[n]
             + 0.10 * mk[n]
             + 0.08 * scores[n]["zone"]
         )
         for n in range(1, POOL + 1)
     }
-    # 刚开出一期的过热号略降，极端冷号略降
     last = set(draws[-1]["numbers"]) if draws else set()
     for n in ens:
         if n in last:
@@ -626,27 +771,29 @@ def predict_groups(
             ens[n] *= 0.88
     ranked1 = sorted(ens.keys(), key=lambda n: ens[n], reverse=True)
 
-    # ---- 方案2：遗漏节奏 + 冷热转换（回补向）----
+    # ---- 方案2：遗漏节奏 + 三空/四空/六空口诀 ----
     gap_focus = {
         n: (
-            0.42 * rhythm[n]
-            + 0.22 * scores[n]["gap"]
-            + 0.18 * scores[n]["hotcold"]
-            + 0.10 * am[n]
-            + 0.08 * scores[n]["total"]
+            0.34 * rhythm[n]
+            + 0.22 * folk_s[n]
+            + 0.18 * scores[n]["gap"]
+            + 0.14 * scores[n]["hotcold"]
+            + 0.07 * am[n]
+            + 0.05 * scores[n]["total"]
         )
         for n in range(1, POOL + 1)
     }
     ranked2 = sorted(gap_focus.keys(), key=lambda n: gap_focus[n], reverse=True)
 
-    # ---- 方案3：共现 + EMA热 + 正马尔可夫（延续向）----
+    # ---- 方案3：共现热 + 重号/对称/封口/斜连 ----
     hot_focus = {
         n: (
-            0.34 * cooc[n]
-            + 0.28 * ema[n]
-            + 0.22 * mk[n]
+            0.26 * cooc[n]
+            + 0.22 * ema[n]
+            + 0.18 * folk_s[n]
+            + 0.16 * mk[n]
             + 0.10 * scores[n]["total"]
-            + 0.06 * scores[n]["consec"]
+            + 0.08 * scores[n]["consec"]
         )
         for n in range(1, POOL + 1)
     }
@@ -692,6 +839,7 @@ def predict_groups(
         "scheme2_gap_rhythm": scheme2,
         "scheme3_cooc_hot": scheme3,
         "duplex10_11": duplex10,
+        "folk_tips": folk["detail"],
     }
 
 
@@ -707,64 +855,76 @@ def predict_jin_dan(
 ) -> Dict:
     """
     金胆 = 下一期最可能开出的 1 个号码。
-    综合：三组方案共识、综合评分、反马尔可夫、遗漏适中、非上期刚开。
-    另给银胆/铜胆（备选）。
+    综合：三组共识、评分、民间跨度定胆/封口/对称等参考。
     """
     w = _norm_weights(weights or load_weights())
     scores = score_numbers(draws, w, seed=seed)
     am = anti_markov_scores(draws)
     gaps = current_gaps(draws)
+    folk = folk_tips_analysis(draws)
+    folk_s: Dict[int, float] = folk["scores"]  # type: ignore[assignment]
+    folk_d: Dict = folk["detail"]  # type: ignore[assignment]
     groups = groups or predict_groups(draws, w, seed=seed)
     last_set = set(draws[-1]["numbers"]) if draws else set()
 
-    # 方案共识：出现在选10/选5中的次数加权
+    # 方案共识
     consensus = Counter()
     for key, nums in groups.items():
-        if key == "core":
+        if key in ("core", "folk_tips") or not isinstance(nums, (list, tuple)):
             continue
-        weight = 1.5 if key.endswith("_5") else 1.0
+        weight = 1.2 if key == "duplex10_11" else 1.0
         for i, n in enumerate(sorted(nums, key=lambda x: -scores[x]["total"])):
-            # 越靠前共识分越高
             consensus[n] += weight * (1.0 + 0.08 * (len(nums) - i))
 
     max_c = max(consensus.values()) if consensus else 1.0
+    span_dan = set(folk_d.get("span_dan") or [])
+    fengkou = set(folk_d.get("fengkou") or [])
+    dui = set(folk_d.get("dui_cheng") or [])
+
     jin_scores: Dict[int, float] = {}
     for n in range(1, POOL + 1):
         g = gaps[n]
-        # 遗漏适中（约 2~8 期）加分
         gap_fit = math.exp(-((g - 4.5) ** 2) / 18.0)
         cons = consensus.get(n, 0) / max_c
         s = (
-            0.34 * scores[n]["total"]
-            + 0.28 * am[n]
-            + 0.22 * cons * 100.0
-            + 0.16 * gap_fit * 100.0
+            0.28 * scores[n]["total"]
+            + 0.20 * am[n]
+            + 0.18 * cons * 100.0
+            + 0.16 * folk_s[n]
+            + 0.18 * gap_fit * 100.0
         )
+        if n in span_dan:
+            s += 8  # 跨度定胆加分
+        if n in fengkou:
+            s += 5
+        if n in dui:
+            s += 5
         if n in last_set:
-            s *= 0.78  # 刚开出略降（反续开）
+            s *= 0.78
         if g >= 16:
-            s *= 0.85  # 长期异常
-        if g == 0 and n in last_set:
-            s *= 0.92
+            s *= 0.85
         jin_scores[n] = s
 
     ranked = sorted(jin_scores.keys(), key=lambda x: jin_scores[x], reverse=True)
     gold = ranked[0]
     silver = ranked[1]
     bronze = ranked[2]
-    # 置信度：相对领先幅度（研究评分，不是开出概率；随机基线约25%）
     top = jin_scores[gold]
     second = jin_scores[silver]
     lead = max(0.0, top - second)
     conf = min(78.0, max(40.0, 48.0 + lead * 1.8 + min(8.0, consensus.get(gold, 0))))
 
     reasons = []
+    if gold in span_dan:
+        reasons.append(f"跨度定胆参考（上期跨度{folk_d.get('span')}）")
+    if gold in fengkou:
+        reasons.append("封口号参考")
+    if gold in dui:
+        reasons.append("对称号参考")
     if consensus.get(gold, 0) >= max_c * 0.7:
         reasons.append("多方案共识靠前")
     if 2 <= gaps[gold] <= 8:
         reasons.append(f"遗漏适中（{gaps[gold]}期）")
-    if am[gold] >= 70:
-        reasons.append("反马尔可夫评分高")
     if scores[gold]["total"] >= 60:
         reasons.append("综合评分靠前")
     if not reasons:
@@ -779,6 +939,7 @@ def predict_jin_dan(
         "reasons": reasons,
         "top5": [(n, round(jin_scores[n], 2)) for n in ranked[:5]],
         "gap": gaps[gold],
+        "folk_span": folk_d.get("span"),
     }
 
 
@@ -1358,6 +1519,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
 
     analysis = build_analysis(draws, weights)
     groups = predict_groups(draws, weights)
+    folk_tips = groups.pop("folk_tips", None) or folk_tips_analysis(draws)["detail"]
     jin_dan = predict_jin_dan(draws, groups=groups, weights=weights)
     jd_bt = backtest_jin_dan(draws, window=min(50, max(10, len(draws) - 15)), weights=weights)
     long_term = analyze_long_term(draws)
@@ -1376,11 +1538,14 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         "yin_dan": jin_dan["yin_dan"],
         "tong_dan": jin_dan["tong_dan"],
         "jin_dan_detail": jin_dan,
+        "folk_tips": folk_tips,
         "groups": {k: v for k, v in groups.items() if k != "core"},
         "weights": weights,
     }
     save_last_prediction(pred_payload)
     for name, nums in groups.items():
+        if not isinstance(nums, (list, tuple)):
+            continue
         db.save_prediction(next_period, name, nums, weights, _now())
     db.save_prediction(next_period, "jin_dan", [jin_dan["jin_dan"]], weights, _now())
     db.save_prediction(
@@ -1403,6 +1568,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         next_period=next_period,
         jin_dan=jin_dan,
         jin_dan_backtest=jd_bt,
+        folk_tips=folk_tips,
     )
     REPORT_PATH.write_text(report, encoding="utf-8")
 
@@ -1410,6 +1576,7 @@ def run_pipeline(csv_path: Optional[Path] = None) -> Dict:
         "draws": draws,
         "analysis": analysis,
         "groups": groups,
+        "folk_tips": folk_tips,
         "jin_dan": jin_dan,
         "jin_dan_backtest": jd_bt,
         "long_term": long_term,
@@ -1434,6 +1601,7 @@ def render_report(
     next_period: int,
     jin_dan: Optional[Dict] = None,
     jin_dan_backtest: Optional[Dict] = None,
+    folk_tips: Optional[Dict] = None,
 ) -> str:
     latest = draws[-1]
     lines: List[str] = []
@@ -1560,17 +1728,28 @@ def render_report(
             + " ".join(f"{n:02d}({s})" for n, s in jin_dan["top5"])
         )
         a("")
+    if folk_tips:
+        a("【民间技巧参考·仅供研究】")
+        a(f"上期跨度：{folk_tips.get('span')} → 跨度定胆候选 {fmt_nums(folk_tips.get('span_dan') or [])}")
+        a(f"三空打中间：{fmt_nums(folk_tips.get('san_kong') or []) or '无'}")
+        a(f"四空打两边：{fmt_nums(folk_tips.get('si_kong') or []) or '无'}")
+        a(f"六空以上打连子：{fmt_nums(folk_tips.get('liu_kong') or []) or '无'}")
+        a(f"封口号：{fmt_nums(folk_tips.get('fengkou') or [])}")
+        a(f"重号：{fmt_nums(folk_tips.get('zhong_hao') or []) or '无'}")
+        a(f"对称号：{fmt_nums(folk_tips.get('dui_cheng') or [])}")
+        a("（斜连号已并入评分；技巧只加分，不单独包中）")
+        a("")
     a("【选10 · 三组自由算法】")
-    a(f"方案1 多因子集成优选：{fmt_nums(groups['scheme1_ensemble'])}")
-    a(f"方案2 遗漏节奏回补：{fmt_nums(groups['scheme2_gap_rhythm'])}")
-    a(f"方案3 共现热延续：{fmt_nums(groups['scheme3_cooc_hot'])}")
+    a(f"方案1 多因子集成+技巧：{fmt_nums(groups['scheme1_ensemble'])}")
+    a(f"方案2 遗漏节奏/空位口诀：{fmt_nums(groups['scheme2_gap_rhythm'])}")
+    a(f"方案3 共现热/重号对称封口：{fmt_nums(groups['scheme3_cooc_hot'])}")
     a("")
     a("【三组混合复式】")
     a(
         f"选10复式11（三组混合+每组保送2码，C(11,10)=11注）："
         f"{fmt_nums(groups['duplex10_11'])}"
     )
-    a("说明：算法已放开，按回测命中优化；复式优先覆盖三组差异化号码。")
+    a("说明：已融合民间技巧参考；复式优先覆盖三组差异化号码。")
     a("")
     a(f"推荐10个核心号码：{fmt_nums(groups['scheme1_ensemble'])}")
     a(f"推荐选10复式11：{fmt_nums(groups['duplex10_11'])}")
