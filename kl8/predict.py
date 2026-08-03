@@ -949,6 +949,23 @@ def predict_groups(
 
     duplex11 = pick_folk_koujue(draws, count=PICK_DUPLEX_10)
     duplex5 = pick_folk_koujue(draws, count=PICK_DUPLEX_5)
+
+    # 方法五：精确跨度号（金胆）必须进入复式方案
+    span_dan = [int(x) for x in (folk["detail"].get("span_dan") or [])]  # type: ignore[union-attr]
+    exact_span = span_dan[0] if span_dan else None
+    if exact_span is not None:
+        if exact_span not in duplex11:
+            # 替换口诀分最低者
+            weak = min(duplex11, key=lambda n: (folk_s.get(n, 0.0), -n))
+            duplex11 = sorted(
+                [exact_span if n == weak else n for n in duplex11]
+            )
+        if exact_span not in duplex5:
+            weak5 = min(duplex5, key=lambda n: (folk_s.get(n, 0.0), -n))
+            duplex5 = sorted(
+                [exact_span if n == weak5 else n for n in duplex5]
+            )
+
     # 核心10：口诀复式11中按五法口诀分取前10
     folk_rank = sorted(duplex11, key=lambda n: folk_s.get(n, 0.0), reverse=True)
     core10 = sorted(folk_rank[:PICK_N])
@@ -1022,9 +1039,9 @@ def predict_jin_dan(
             s *= 0.55
         jin_scores[n] = s
 
-    # 金胆优先从跨度定胆候选中取最高口诀分
+    # 金胆：方法五优先精确跨度；银/铜取其余口诀高分
     if span_dan:
-        gold = max(span_dan, key=lambda x: (jin_scores[x], folk_s.get(x, 0.0), -x))
+        gold = int(span_dan[0])  # 精确跨度号
         others = [n for n in range(1, POOL + 1) if n != gold]
         ranked_rest = sorted(others, key=lambda x: jin_scores[x], reverse=True)
         ranked = [gold] + ranked_rest
