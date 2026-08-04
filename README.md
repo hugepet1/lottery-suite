@@ -125,6 +125,12 @@ python app_gui.py
 2. 打开 **快乐8 → 基本走势图** 查看遗漏矩阵  
 3. 在 **选十预测** 点击「生成3组选十」
 
+命令行（可定点回测某一期，例如 2026188）：
+
+```bash
+python -m kl8.predict --csv data/kl8/快乐8_近100期开奖数据.csv --period 2026188 --export-trend --save
+```
+
 ### 打包 exe
 
 ```bash

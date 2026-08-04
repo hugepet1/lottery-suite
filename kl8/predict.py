@@ -541,22 +541,30 @@ def score_gap4(gaps: Sequence[Tuple[int, int]]) -> Dict[int, float]:
 
 
 def score_gap6(gaps: Sequence[Tuple[int, int]]) -> Dict[int, float]:
-    """六空打连子：空位≥6，重点布局内部连号对。"""
+    """六空打连子：空位≥6，重点布局内部连号对（如 50-57→51-52 或 55-56）。"""
     sc: Dict[int, float] = defaultdict(float)
     for lo, hi in gaps:
         length = hi - lo + 1
         if length >= 6:
-            # 内部分段：前连子 / 后连子 / 中部连子
+            # 前连子 / 后连子 / 中部连子；大空位再加密四分位点连对
+            mid = (lo + hi) // 2
             pairs = [
                 (lo + 1, lo + 2),
                 (hi - 2, hi - 1),
-                ((lo + hi) // 2, (lo + hi) // 2 + 1),
+                (mid, mid + 1),
             ]
+            if length >= 8:
+                q1 = lo + max(1, length // 4)
+                q3 = hi - max(1, length // 4)
+                pairs.extend([(q1, q1 + 1), (q3 - 1, q3)])
             boost = 2.2 + 0.15 * min(length - 6, 8)
             for a, b in pairs:
                 if lo <= a < b <= hi:
                     sc[a] += boost
                     sc[b] += boost
+            # 空位内部轻铺，便于组内形成连号
+            for n in range(lo + 1, hi):
+                sc[n] += 0.35
     return sc
 
 
@@ -953,12 +961,15 @@ def _pick_from_scores(
 def generate_three_groups(
     draws: Sequence[Draw],
     weights: Optional[Dict[str, float]] = None,
+    target_period: Optional[int] = None,
 ) -> dict:
     """
     生成 3 组选十：
     A 空位主导（三空/四空/六空 + 连号）
     B 斜连/对称/四区
     C 冷热 + 遗漏周期 + 跨度定胆
+
+    target_period: 若指定，结果标注该目标期（回测时用历史截止期的下一期）。
     """
     if len(draws) < 5:
         raise RuntimeError("历史数据太少，至少需要 5 期")
@@ -979,7 +990,12 @@ def generate_three_groups(
             if hi + 1 <= POOL_MAX:
                 prefer_a.append(hi + 1)
         elif length >= 6:
-            prefer_a.extend([lo + 1, lo + 2, hi - 2, hi - 1, (lo + hi) // 2])
+            mid = (lo + hi) // 2
+            prefer_a.extend([lo + 1, lo + 2, hi - 2, hi - 1, mid, mid + 1])
+            if length >= 8:
+                q1 = lo + max(1, length // 4)
+                q3 = hi - max(1, length // 4)
+                prefer_a.extend([q1, q1 + 1, q3 - 1, q3])
     score_a = {
         n: 0.45 * blend[n]
         + 0.20 * normed["gap3"][n]
@@ -1072,10 +1088,12 @@ def generate_three_groups(
     tuo = [n for n in top_blend if n not in dan][:12]
 
     tip_lines = _build_tips(analysis, groups, dan)
+    base_period = int(draws[-1]["period"])
+    resolved_target = int(target_period) if target_period is not None else base_period + 1
 
     return {
-        "target_period": int(draws[-1]["period"]) + 1,
-        "base_period": int(draws[-1]["period"]),
+        "target_period": resolved_target,
+        "base_period": base_period,
         "groups": groups,
         "dan": dan[:4],
         "tuo": tuo,
@@ -1091,6 +1109,82 @@ def generate_three_groups(
         "tips": tip_lines,
         "weights": w,
     }
+
+
+def history_before(period: int, draws: Optional[Sequence[Draw]] = None) -> List[Draw]:
+    """截取严格小于目标期的历史，用于回测/定点预测。"""
+    all_draws = list(draws) if draws is not None else load_history()
+    prior = [d for d in all_draws if int(d["period"]) < int(period)]
+    prior.sort(key=lambda x: int(x["period"]))
+    return prior
+
+
+def predict_for_period(
+    period: int,
+    draws: Optional[Sequence[Draw]] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> dict:
+    """
+    用目标期之前的全部历史生成 3 组选十。
+    若库中已有该期开奖，附加 actual / hit 对比字段。
+    """
+    all_draws = list(draws) if draws is not None else load_history()
+    prior = history_before(period, all_draws)
+    if len(prior) < 5:
+        raise RuntimeError(f"期号 {period} 之前历史不足 5 期（现有 {len(prior)}）")
+    result = generate_three_groups(prior, weights=weights, target_period=period)
+    actual = next((d for d in all_draws if int(d["period"]) == int(period)), None)
+    if actual is not None:
+        actual_nums = list(map(int, actual["nums"]))
+        actual_set = set(actual_nums)
+        result["actual"] = actual_nums
+        result["compare"] = []
+        for g in result["groups"]:
+            hit = sorted(set(g["nums"]) & actual_set)
+            result["compare"].append(
+                {
+                    "name": g["name"],
+                    "hit_count": len(hit),
+                    "hit_nums": hit,
+                }
+            )
+        dan_hit = sorted(set(result["dan"]) & actual_set)
+        result["dan_hit"] = dan_hit
+    return result
+
+
+def export_trend_database(
+    draws: Optional[Sequence[Draw]] = None,
+    recent: Optional[int] = None,
+    path: Optional[Path] = None,
+) -> Path:
+    """导出基本走势图数据库（期号 × 01-80 命中/遗漏）到 JSON。"""
+    all_draws = list(draws) if draws is not None else load_history()
+    rows = build_trend_matrix(all_draws, recent=recent)
+    payload = {
+        "pool_max": POOL_MAX,
+        "draw_count": DRAW_COUNT,
+        "periods": len(rows),
+        "from_period": rows[0]["period"] if rows else None,
+        "to_period": rows[-1]["period"] if rows else None,
+        "rows": [
+            {
+                "period": r["period"],
+                "date": r.get("date", ""),
+                "nums": list(r["nums"]),
+                "cells": [
+                    {"num": c["num"], "hit": bool(c["hit"]), "omit": int(c["omit"])}
+                    for c in r["cells"]
+                ],
+            }
+            for r in rows
+        ],
+    }
+    out = path or (DATA_DIR / "trend_matrix.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return out
 
 
 def _build_tips(analysis: dict, groups: list, dan: List[int]) -> List[str]:
@@ -1153,8 +1247,13 @@ class TrendPredictor:
         self.draws = list(draws)
         self.blend, _, self.analysis = blend_rule_scores(self.draws, self.weights)
 
-    def predict_groups(self) -> dict:
-        return generate_three_groups(self.draws, self.weights)
+    def predict_groups(self, target_period: Optional[int] = None) -> dict:
+        return generate_three_groups(
+            self.draws, self.weights, target_period=target_period
+        )
+
+    def predict_period(self, period: int) -> dict:
+        return predict_for_period(period, self.draws, self.weights)
 
     def trend(self, recent: int = 50) -> List[TrendRow]:
         return build_trend_matrix(self.draws, recent=recent)
@@ -1294,17 +1393,102 @@ def format_prediction_text(result: dict) -> str:
     return "\n".join(lines)
 
 
+def format_compare_inline(result: dict) -> str:
+    if "compare" not in result:
+        return ""
+    lines = ["", "=== 与开奖对比 ==="]
+    if result.get("actual"):
+        lines.append(f"开奖：{fmt_nums(result['actual'])}")
+    for row in result["compare"]:
+        lines.append(
+            f"{row['name']} 命中 {row['hit_count']}/10：{fmt_nums(row['hit_nums']) or '-'}"
+        )
+    if "dan_hit" in result:
+        lines.append(
+            f"胆码命中：{fmt_nums(result['dan_hit']) or '-'} / {fmt_nums(result['dan'])}"
+        )
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="快乐8 走势图选十预测")
+    parser.add_argument(
+        "--period",
+        type=int,
+        default=None,
+        help="目标期号（用该期之前历史预测；默认预测最新期+1）",
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="先导入 CSV 再预测（如 快乐8_近100期开奖数据.csv）",
+    )
+    parser.add_argument(
+        "--export-trend",
+        action="store_true",
+        help="导出基本走势图数据库 trend_matrix.json",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="保存为 last_prediction.json",
+    )
+    args = parser.parse_args()
+
     ensure_data_files()
-    draws = load_history()
+    if args.csv:
+        draws = import_csv(args.csv)
+        print(f"已导入 CSV：{len(draws)} 期")
+    else:
+        draws = load_history()
     print(f"历史 {len(draws)} 期")
     if draws:
         print("最新", draws[-1]["period"], fmt_nums(draws[-1]["nums"]))
-    model = TrendPredictor()
-    model.fit(draws)
-    result = model.predict_groups()
+
+    if args.export_trend:
+        out = export_trend_database(draws)
+        print(f"已导出走势图数据库：{out}")
+
+    if args.period is not None:
+        result = predict_for_period(args.period, draws)
+    else:
+        model = TrendPredictor()
+        model.fit(draws)
+        result = model.predict_groups()
     print(format_prediction_text(result))
-    trend = model.trend(30)
+    print(format_compare_inline(result))
+    if args.save:
+        save_last_prediction(result)
+        # 定点回测结果另存一份
+        stamp = DATA_DIR / f"prediction_{result['target_period']}.json"
+        with stamp.open("w", encoding="utf-8") as f:
+            payload = {
+                "target_period": result["target_period"],
+                "base_period": result["base_period"],
+                "groups": [
+                    {"name": g["name"], "focus": g["focus"], "nums": list(g["nums"])}
+                    for g in result["groups"]
+                ],
+                "dan": list(result["dan"]),
+                "tuo": list(result.get("tuo", [])),
+                "analysis": result.get("analysis"),
+                "tips": result.get("tips"),
+                "actual": result.get("actual"),
+                "compare": result.get("compare"),
+                "dan_hit": result.get("dan_hit"),
+            }
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"已保存：{LAST_PRED_PATH} / {stamp}")
+
+    trend = build_trend_matrix(
+        history_before(result["target_period"], draws)
+        if args.period is not None
+        else draws,
+        recent=30,
+    )
     print(f"走势图行数 {len(trend)}，列 80")
     if trend:
         last = trend[-1]

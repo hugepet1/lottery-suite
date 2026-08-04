@@ -24,3 +24,6 @@ Desktop.ini
 # Uncomment next lines if you do NOT want to publish personal draw history:
 # data/pl3/*.json
 # data/dlt/*.json
+
+# Regenerable full 01-80 omission matrix (export via: python -m kl8.predict --export-trend)
+data/kl8/trend_matrix.json
