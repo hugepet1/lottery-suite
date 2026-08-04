@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """彩票号码助手：排列三 + 大乐透 + 快乐8 统一桌面 GUI（算法独立分区）。"""
 
@@ -1904,11 +1904,11 @@ class Kl8Panel(ttk.Frame):
         bar.pack(fill="x")
         self.btn_predict = BubbleButton(
             bar,
-            text="生成3组选十",
+            text="生成选十/选五/复式六",
             command=self.run_predict,
             bg_color=Theme.KL8,
             hover_color=Theme.KL8_HOVER,
-            width=130,
+            width=170,
             height=36,
         )
         self.btn_predict.pack(side="left")
@@ -1939,11 +1939,11 @@ class Kl8Panel(ttk.Frame):
         table_box = ttk.Frame(self.tab_predict, style="Card.TFrame")
         table_box.pack(fill="both", expand=True)
         cols = ("group", "focus", "nums", "score")
-        self.tree = ttk.Treeview(table_box, columns=cols, show="headings", height=6)
+        self.tree = ttk.Treeview(table_box, columns=cols, show="headings", height=10)
         heads = {
-            "group": ("组别", 110),
-            "focus": ("规则侧重", 280),
-            "nums": ("选十号码", 320),
+            "group": ("组别", 120),
+            "focus": ("规则侧重", 260),
+            "nums": ("号码", 320),
             "score": ("综合分", 70),
         }
         for c, (title, w) in heads.items():
@@ -2272,14 +2272,19 @@ class Kl8Panel(ttk.Frame):
             self._last_result = result
             self._show_result(result)
             self._refresh_weight_label()
-            self._notify(f"快乐8：已生成 3 组选十 → {result['target_period']} 期")
+            self._notify(
+                f"快乐8：已生成选十+选五+复式六 → {result['target_period']} 期"
+            )
         except Exception as e:
             messagebox.showerror("预测失败", str(e))
 
     def _show_result(self, result: dict) -> None:
         self.tree.delete(*self.tree.get_children())
         self.next_period_var.set(f"目标期 {result['target_period']}")
-        for g in result["groups"]:
+        all_groups = list(result.get("groups") or [])
+        all_groups.extend(result.get("groups_x5") or [])
+        all_groups.extend(result.get("groups_x6") or [])
+        for g in all_groups:
             self.tree.insert(
                 "",
                 "end",
@@ -2287,13 +2292,13 @@ class Kl8Panel(ttk.Frame):
                     g["name"],
                     g["focus"],
                     kl8api.fmt_nums(g["nums"]),
-                    f"{g['score']:.3f}",
+                    f"{g.get('score', 0):.3f}",
                 ),
             )
         self.dan_var.set(f"胆码（选五/选六定胆）：{kl8api.fmt_nums(result['dan'])}")
         self.tuo_var.set(
             f"拖码建议：{kl8api.fmt_nums(result.get('tuo', [])[:10])}　｜　"
-            "选七以上可用胆拖（定3-4胆）"
+            "复式六＝选五复式6注或选六；选七以上可用胆拖"
         )
         self.tips.configure(state="normal")
         self.tips.delete("1.0", "end")

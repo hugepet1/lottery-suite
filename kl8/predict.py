@@ -26,6 +26,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 POOL_MAX = 80
 DRAW_COUNT = 20
 PICK_COUNT = 10  # 选十
+PICK5 = 5        # 选五
+PICK6 = 6        # 复式六 / 选六
 ZONES = ((1, 20), (21, 40), (41, 60), (61, 80))
 ZONE_NAMES = ("一区1-20", "二区21-40", "三区41-60", "四区61-80")
 
@@ -834,7 +836,11 @@ def blend_rule_scores(
 # ---------------------------------------------------------------------------
 
 
-def _ensure_consec_pair(picks: List[int], pool_scores: Dict[int, float]) -> List[int]:
+def _ensure_consec_pair(
+    picks: List[int],
+    pool_scores: Dict[int, float],
+    k: int = PICK_COUNT,
+) -> List[int]:
     """保证至少有一组连号；若无则替换最低分号插入最佳连对。"""
     groups = consecutive_groups(picks)
     if any(len(g) >= 2 for g in groups):
@@ -860,33 +866,40 @@ def _ensure_consec_pair(picks: List[int], pool_scores: Dict[int, float]) -> List
                     chosen.remove(v)
                     chosen.add(x)
                     break
-    # 若仍不足 10 个
-    while len(chosen) < PICK_COUNT:
+    while len(chosen) < k:
         for n, _ in sorted(pool_scores.items(), key=lambda kv: -kv[1]):
             if n not in chosen:
                 chosen.add(n)
                 break
-    while len(chosen) > PICK_COUNT:
+    while len(chosen) > k:
         v = min(chosen, key=lambda n: pool_scores.get(n, 0))
         chosen.remove(v)
     return sorted(chosen)
 
 
-def _balance_zones(picks: List[int], scores: Dict[int, float]) -> List[int]:
-    """四区尽量 2–3 个，避免单区堆叠。"""
+def _balance_zones(
+    picks: List[int],
+    scores: Dict[int, float],
+    k: int = PICK_COUNT,
+) -> List[int]:
+    """四区尽量分散，避免单区堆叠。选五/选六时每区最多 2，选十最多 4。"""
+    max_per_zone = 2 if k <= 6 else 4
+    min_zones_cover = 1 if k <= 5 else 2
     chosen = set(picks)
     counts = [sum(1 for n in chosen if lo <= n <= hi) for lo, hi in ZONES]
     # 过多区削减，过少区补充
     for zi, c in enumerate(counts):
         lo, hi = ZONES[zi]
-        while c > 4:
+        while c > max_per_zone:
             victims = [n for n in chosen if lo <= n <= hi]
             victims.sort(key=lambda n: scores.get(n, 0))
             if not victims:
                 break
             chosen.remove(victims[0])
             c -= 1
-        while c < 1:
+        # 选五不必每区都有；选六及以上尽量覆盖更多区
+        need = 1 if (k >= 6 and counts[zi] == 0 and zi < min_zones_cover) else 0
+        while need > 0 and c < 1:
             cands = [
                 n
                 for n in range(lo, hi + 1)
@@ -895,9 +908,7 @@ def _balance_zones(picks: List[int], scores: Dict[int, float]) -> List[int]:
             if not cands:
                 break
             cands.sort(key=lambda n: -scores.get(n, 0))
-            # 若已满，先踢别区最高堆叠
-            if len(chosen) >= PICK_COUNT:
-                # 找最多的区踢一个
+            if len(chosen) >= k:
                 zc = [sum(1 for n in chosen if a <= n <= b) for a, b in ZONES]
                 mz = max(range(4), key=lambda i: zc[i])
                 if zc[mz] <= 1:
@@ -910,12 +921,36 @@ def _balance_zones(picks: List[int], scores: Dict[int, float]) -> List[int]:
                 chosen.remove(victim)
             chosen.add(cands[0])
             c += 1
-    while len(chosen) < PICK_COUNT:
+            need -= 1
+        # 选十：尽量每区至少 1
+        while k >= 10 and c < 1:
+            cands = [
+                n
+                for n in range(lo, hi + 1)
+                if n not in chosen
+            ]
+            if not cands:
+                break
+            cands.sort(key=lambda n: -scores.get(n, 0))
+            if len(chosen) >= k:
+                zc = [sum(1 for n in chosen if a <= n <= b) for a, b in ZONES]
+                mz = max(range(4), key=lambda i: zc[i])
+                if zc[mz] <= 1:
+                    break
+                a, b = ZONES[mz]
+                victim = min(
+                    (n for n in chosen if a <= n <= b),
+                    key=lambda n: scores.get(n, 0),
+                )
+                chosen.remove(victim)
+            chosen.add(cands[0])
+            c += 1
+    while len(chosen) < k:
         for n, _ in sorted(scores.items(), key=lambda kv: -kv[1]):
             if n not in chosen:
                 chosen.add(n)
                 break
-    while len(chosen) > PICK_COUNT:
+    while len(chosen) > k:
         chosen.remove(min(chosen, key=lambda n: scores.get(n, 0)))
     return sorted(chosen)
 
@@ -1005,8 +1040,8 @@ def generate_three_groups(
         for n in range(1, POOL_MAX + 1)
     }
     g1 = _pick_from_scores(score_a, prefer=prefer_a, rng=random.Random(11))
-    g1 = _balance_zones(g1, score_a)
-    g1 = _ensure_consec_pair(g1, score_a)
+    g1 = _balance_zones(g1, score_a, PICK_COUNT)
+    g1 = _ensure_consec_pair(g1, score_a, PICK_COUNT)
 
     # B：斜连 + 对称 + 四区
     prefer_b: List[int] = []
@@ -1031,8 +1066,8 @@ def generate_three_groups(
     overlap = len(set(g1) & set(g2))
     if overlap >= 7:
         g2 = _pick_from_scores(score_b, prefer=prefer_b, exclude=g1[:4], rng=random.Random(23))
-    g2 = _balance_zones(g2, score_b)
-    g2 = _ensure_consec_pair(g2, score_b)
+    g2 = _balance_zones(g2, score_b, PICK_COUNT)
+    g2 = _ensure_consec_pair(g2, score_b, PICK_COUNT)
 
     # C：冷热 + 遗漏 + 跨度
     prefer_c = list(analysis.get("hot3") or [])
@@ -1049,8 +1084,8 @@ def generate_three_groups(
     }
     ban_c = list(set(g1) & set(g2))
     g3 = _pick_from_scores(score_c, prefer=prefer_c, exclude=ban_c[:3], rng=random.Random(33))
-    g3 = _balance_zones(g3, score_c)
-    g3 = _ensure_consec_pair(g3, score_c)
+    g3 = _balance_zones(g3, score_c, PICK_COUNT)
+    g3 = _ensure_consec_pair(g3, score_c, PICK_COUNT)
 
     groups = [
         {
@@ -1073,7 +1108,137 @@ def generate_three_groups(
         },
     ]
 
-    # 胆码：三组交集 + 融合分 Top
+    # ---- 3 组选五 + 3 组复式六（同规则缩水）----
+    def _shrink_group(
+        score: Dict[int, float],
+        prefer: Sequence[int],
+        k: int,
+        seed: int,
+        exclude: Optional[Sequence[int]] = None,
+        force_prefer: Optional[Sequence[int]] = None,
+    ) -> List[int]:
+        # 选五/复式六：优先定胆（force_prefer）再补高分号
+        pref = list(force_prefer or []) + list(prefer)
+        picks = _pick_from_scores(
+            score, k=k, prefer=pref, exclude=exclude, rng=random.Random(seed)
+        )
+        picks = _balance_zones(picks, score, k)
+        picks = _ensure_consec_pair(picks, score, k)
+        return picks
+
+    # 选五/复式六定胆：三空中位 + 四空边 + 六空连子（优先中段 21-40）+ 融合 Top
+    core_dan: List[int] = []
+    gap6_pairs: List[int] = []
+    for lo, hi in gaps:
+        length = hi - lo + 1
+        if length == 3:
+            core_dan.append((lo + hi) // 2)
+        elif length == 4:
+            if lo - 1 >= 1:
+                core_dan.append(lo - 1)
+            if hi + 1 <= POOL_MAX:
+                core_dan.append(hi + 1)
+        elif length >= 6:
+            mid = (lo + hi) // 2
+            pair = [mid, mid + 1]
+            # 中段六空连子优先进入定胆
+            if 21 <= mid <= 40:
+                gap6_pairs = pair + gap6_pairs
+            else:
+                gap6_pairs.extend(pair)
+            core_dan.extend(pair)
+    # 六空连子插到定胆最前，保证选五/复式六能吃到大空位
+    ordered_dan: List[int] = []
+    for n in gap6_pairs + core_dan:
+        if n not in ordered_dan and 1 <= n <= POOL_MAX:
+            ordered_dan.append(n)
+    top_for_dan = sorted(blend, key=blend.get, reverse=True)
+    for n in top_for_dan:
+        if n not in ordered_dan:
+            ordered_dan.append(n)
+        if len(ordered_dan) >= 10:
+            break
+    core_dan = ordered_dan
+
+    groups_x5 = [
+        {
+            "name": "A组·选五",
+            "focus": "空位定胆缩水（三空中位/四空边/六空连子）",
+            "nums": _shrink_group(score_a, prefer_a, PICK5, 111, force_prefer=core_dan[:4]),
+            "play": "选五",
+        },
+        {
+            "name": "B组·选五",
+            "focus": "斜连/对称定胆缩水",
+            "nums": _shrink_group(
+                score_b,
+                prefer_b,
+                PICK5,
+                222,
+                exclude=core_dan[:1],
+                force_prefer=core_dan[1:5],
+            ),
+            "play": "选五",
+        },
+        {
+            "name": "C组·选五",
+            "focus": "冷热/跨度定胆缩水",
+            "nums": _shrink_group(
+                score_c,
+                prefer_c,
+                PICK5,
+                333,
+                exclude=core_dan[:2],
+                force_prefer=core_dan[2:6],
+            ),
+            "play": "选五",
+        },
+    ]
+    for g in groups_x5:
+        g["score"] = sum(blend.get(n, 0) for n in g["nums"])
+
+    # 复式六：每组 6 码，可作选五复式（C(6,5)=6 注）或选六单式
+    groups_x6 = [
+        {
+            "name": "A组·复式六",
+            "focus": "空位主导 6 码复式（选五复式 6 注 / 选六）",
+            "nums": _shrink_group(score_a, prefer_a, PICK6, 411, force_prefer=core_dan[:5]),
+            "play": "复式六",
+            "combo_x5": 6,  # C(6,5)
+        },
+        {
+            "name": "B组·复式六",
+            "focus": "斜连对称 6 码复式",
+            "nums": _shrink_group(
+                score_b,
+                prefer_b,
+                PICK6,
+                422,
+                exclude=groups_x5[0]["nums"][:2],
+                force_prefer=core_dan[1:6],
+            ),
+            "play": "复式六",
+            "combo_x5": 6,
+        },
+        {
+            "name": "C组·复式六",
+            "focus": "冷热跨度 6 码复式",
+            "nums": _shrink_group(
+                score_c,
+                prefer_c,
+                PICK6,
+                433,
+                exclude=groups_x5[1]["nums"][:2],
+                force_prefer=core_dan[2:7],
+            ),
+            "play": "复式六",
+            "combo_x5": 6,
+        },
+    ]
+    for g in groups_x6:
+        g["score"] = sum(blend.get(n, 0) for n in g["nums"])
+
+    # 胆码：三组选十交集 + 融合分 Top
     counter = Counter(n for g in groups for n in g["nums"])
     dan = [n for n, c in counter.most_common() if c >= 2]
     top_blend = sorted(blend, key=blend.get, reverse=True)
@@ -1088,6 +1253,9 @@ def generate_three_groups(
     tuo = [n for n in top_blend if n not in dan][:12]
 
     tip_lines = _build_tips(analysis, groups, dan)
+    tip_lines.append(
+        "选五：每组 5 码单式；复式六：每组 6 码可打选五复式（C(6,5)=6 注）或选六。"
+    )
     base_period = int(draws[-1]["period"])
     resolved_target = int(target_period) if target_period is not None else base_period + 1
 
@@ -1095,6 +1263,8 @@ def generate_three_groups(
         "target_period": resolved_target,
         "base_period": base_period,
         "groups": groups,
+        "groups_x5": groups_x5,
+        "groups_x6": groups_x6,
         "dan": dan[:4],
         "tuo": tuo,
         "blend_top": top_blend[:20],
@@ -1138,16 +1308,24 @@ def predict_for_period(
         actual_nums = list(map(int, actual["nums"]))
         actual_set = set(actual_nums)
         result["actual"] = actual_nums
-        result["compare"] = []
-        for g in result["groups"]:
-            hit = sorted(set(g["nums"]) & actual_set)
-            result["compare"].append(
-                {
-                    "name": g["name"],
-                    "hit_count": len(hit),
-                    "hit_nums": hit,
-                }
-            )
+
+        def _cmp(groups: Sequence[dict], total: int) -> List[dict]:
+            rows = []
+            for g in groups:
+                hit = sorted(set(g["nums"]) & actual_set)
+                rows.append(
+                    {
+                        "name": g["name"],
+                        "hit_count": len(hit),
+                        "hit_total": total,
+                        "hit_nums": hit,
+                    }
+                )
+            return rows
+
+        result["compare"] = _cmp(result["groups"], PICK_COUNT)
+        result["compare_x5"] = _cmp(result.get("groups_x5") or [], PICK5)
+        result["compare_x6"] = _cmp(result.get("groups_x6") or [], PICK6)
         dan_hit = sorted(set(result["dan"]) & actual_set)
         result["dan_hit"] = dan_hit
     return result
@@ -1259,15 +1437,30 @@ class TrendPredictor:
         return build_trend_matrix(self.draws, recent=recent)
 
 
+def _serialize_groups(groups: Sequence[dict]) -> List[dict]:
+    out = []
+    for g in groups:
+        item = {
+            "name": g["name"],
+            "focus": g.get("focus", ""),
+            "nums": list(g["nums"]),
+        }
+        if g.get("play"):
+            item["play"] = g["play"]
+        if "combo_x5" in g:
+            item["combo_x5"] = g["combo_x5"]
+        out.append(item)
+    return out
+
+
 def save_last_prediction(result: dict) -> None:
     LAST_PRED_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "target_period": result["target_period"],
         "base_period": result["base_period"],
-        "groups": [
-            {"name": g["name"], "focus": g["focus"], "nums": list(g["nums"])}
-            for g in result["groups"]
-        ],
+        "groups": _serialize_groups(result["groups"]),
+        "groups_x5": _serialize_groups(result.get("groups_x5") or []),
+        "groups_x6": _serialize_groups(result.get("groups_x6") or []),
         "dan": list(result["dan"]),
         "tuo": list(result.get("tuo", [])),
     }
@@ -1376,13 +1569,26 @@ def format_compare_text(result: dict) -> str:
 
 def format_prediction_text(result: dict) -> str:
     lines = [
-        f"快乐8 选十预测 → 目标期 {result['target_period']}（基于 {result['base_period']} 期）",
+        f"快乐8 预测 → 目标期 {result['target_period']}（基于 {result['base_period']} 期）",
         "",
+        "【3组选十】",
     ]
     for i, g in enumerate(result["groups"], 1):
         lines.append(f"{i}. {g['name']}")
         lines.append(f"   思路：{g['focus']}")
         lines.append(f"   号码：{fmt_nums(g['nums'])}")
+        lines.append("")
+    if result.get("groups_x5"):
+        lines.append("【3组选五】")
+        for i, g in enumerate(result["groups_x5"], 1):
+            lines.append(f"{i}. {g['name']}：{fmt_nums(g['nums'])}")
+            lines.append(f"   思路：{g['focus']}")
+        lines.append("")
+    if result.get("groups_x6"):
+        lines.append("【3组复式六】（每组6码＝选五复式6注，或选六单式）")
+        for i, g in enumerate(result["groups_x6"], 1):
+            lines.append(f"{i}. {g['name']}：{fmt_nums(g['nums'])}")
+            lines.append(f"   思路：{g['focus']}")
         lines.append("")
     lines.append(f"胆码：{fmt_nums(result['dan'])}")
     lines.append(f"拖码：{fmt_nums(result.get('tuo', [])[:10])}")
@@ -1400,9 +1606,22 @@ def format_compare_inline(result: dict) -> str:
     if result.get("actual"):
         lines.append(f"开奖：{fmt_nums(result['actual'])}")
     for row in result["compare"]:
+        total = row.get("hit_total", 10)
         lines.append(
-            f"{row['name']} 命中 {row['hit_count']}/10：{fmt_nums(row['hit_nums']) or '-'}"
+            f"{row['name']} 命中 {row['hit_count']}/{total}：{fmt_nums(row['hit_nums']) or '-'}"
         )
+    if result.get("compare_x5"):
+        lines.append("选五：")
+        for row in result["compare_x5"]:
+            lines.append(
+                f"  {row['name']} 命中 {row['hit_count']}/5：{fmt_nums(row['hit_nums']) or '-'}"
+            )
+    if result.get("compare_x6"):
+        lines.append("复式六：")
+        for row in result["compare_x6"]:
+            lines.append(
+                f"  {row['name']} 命中 {row['hit_count']}/6：{fmt_nums(row['hit_nums']) or '-'}"
+            )
     if "dan_hit" in result:
         lines.append(
             f"胆码命中：{fmt_nums(result['dan_hit']) or '-'} / {fmt_nums(result['dan'])}"
@@ -1468,16 +1687,17 @@ if __name__ == "__main__":
             payload = {
                 "target_period": result["target_period"],
                 "base_period": result["base_period"],
-                "groups": [
-                    {"name": g["name"], "focus": g["focus"], "nums": list(g["nums"])}
-                    for g in result["groups"]
-                ],
+                "groups": _serialize_groups(result["groups"]),
+                "groups_x5": _serialize_groups(result.get("groups_x5") or []),
+                "groups_x6": _serialize_groups(result.get("groups_x6") or []),
                 "dan": list(result["dan"]),
                 "tuo": list(result.get("tuo", [])),
                 "analysis": result.get("analysis"),
                 "tips": result.get("tips"),
                 "actual": result.get("actual"),
                 "compare": result.get("compare"),
+                "compare_x5": result.get("compare_x5"),
+                "compare_x6": result.get("compare_x6"),
                 "dan_hit": result.get("dan_hit"),
             }
             json.dump(payload, f, ensure_ascii=False, indent=2)
