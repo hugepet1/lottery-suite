@@ -48,5 +48,15 @@
     ],
     "dan_hit": 0,
     "adjusted": true
+  },
+  {
+    "period": 2026193,
+    "hits": [
+      5,
+      4,
+      3
+    ],
+    "dan_hit": 1,
+    "adjusted": true
   }
 ]
