@@ -1,6 +1,6 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""彩票号码助手：排列三 + 大乐透统一桌面 GUI（算法独立分区）。"""
+"""彩票号码助手：排列三 + 大乐透 + 快乐8 统一桌面 GUI（算法独立分区）。"""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from typing import Callable, List, Optional
 
 from pl3 import predict as pl3api
 from dlt import predict as dltapi
+from kl8 import predict as kl8api
 
 APP_TITLE = "彩票号码助手"
-WIN_SIZE = "1100x800"
-WIN_MIN = (980, 700)
+WIN_SIZE = "1180x820"
+WIN_MIN = (1020, 720)
 
 
 class Theme:
@@ -31,10 +32,15 @@ class Theme:
     PL3_HOVER = "#0066D6"
     DLT = "#FF3B30"
     DLT_HOVER = "#E0342B"
+    KL8 = "#FF9500"
+    KL8_HOVER = "#E08600"
     TEXT = "#1C1C1E"
     MUTED = "#8E8E93"
     SELECT_PL3 = "#D6E8FF"
     SELECT_DLT = "#FFE0DD"
+    SELECT_KL8 = "#FFE8C2"
+    HIT_RED = "#E53935"
+    OMIT_GRAY = "#9E9E9E"
     FONT = ("Microsoft YaHei UI", 10)
     FONT_BOLD = ("Microsoft YaHei UI", 10, "bold")
     FONT_TITLE = ("Microsoft YaHei UI", 17, "bold")
@@ -346,6 +352,17 @@ def apply_theme(root: tk.Tk) -> ttk.Style:
         darkcolor=Theme.DLT_HOVER,
     )
     style.map("Dlt.TButton", background=[("active", Theme.DLT_HOVER), ("disabled", "#FFB3AE")])
+    style.configure(
+        "Kl8.TButton",
+        font=Theme.FONT_BOLD,
+        padding=(18, 10),
+        background=Theme.KL8,
+        foreground="#ffffff",
+        bordercolor=Theme.KL8,
+        lightcolor=Theme.KL8,
+        darkcolor=Theme.KL8_HOVER,
+    )
+    style.map("Kl8.TButton", background=[("active", Theme.KL8_HOVER), ("disabled", "#FFD59A")])
 
     style.configure("TNotebook", background=Theme.BG, borderwidth=0)
     style.configure(
@@ -1727,6 +1744,637 @@ class DltPanel(ttk.Frame):
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 快乐8
+# ---------------------------------------------------------------------------
+
+
+class Kl8TrendCanvas(tk.Canvas):
+    """快乐8 基本走势图：红圈命中 + 灰色遗漏值。"""
+
+    def __init__(self, parent, **kwargs) -> None:
+        super().__init__(parent, bg="#FAFAFA", highlightthickness=0, **kwargs)
+        self._rows = []
+        self._cell_w = 18
+        self._cell_h = 20
+        self._label_w = 72
+        self._header_h = 22
+
+    def set_rows(self, rows) -> None:
+        self._rows = rows or []
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        rows = self._rows
+        if not rows:
+            self.create_text(
+                20,
+                20,
+                anchor="nw",
+                text="暂无走势数据，请先导入 CSV 或录入开奖号码。",
+                fill=Theme.MUTED,
+                font=Theme.FONT,
+            )
+            self.configure(scrollregion=(0, 0, 400, 200))
+            return
+
+        cw, ch = self._cell_w, self._cell_h
+        lw, hh = self._label_w, self._header_h
+        cols = 80
+        width = lw + cols * cw + 8
+        height = hh + len(rows) * ch + 8
+
+        # 表头 01-80，分区色带
+        zone_colors = ["#FFF3E0", "#E3F2FD", "#F3E5F5", "#E8F5E9"]
+        for n in range(1, cols + 1):
+            x0 = lw + (n - 1) * cw
+            zi = (n - 1) // 20
+            self.create_rectangle(x0, 0, x0 + cw, hh, fill=zone_colors[zi], outline="#EEEEEE")
+            self.create_text(
+                x0 + cw / 2,
+                hh / 2,
+                text=f"{n:02d}",
+                fill=Theme.MUTED if n % 5 else Theme.TEXT,
+                font=("Consolas", 7),
+            )
+        self.create_text(lw / 2, hh / 2, text="期号", fill=Theme.TEXT, font=Theme.FONT_HINT)
+
+        for r_i, row in enumerate(rows):
+            y0 = hh + r_i * ch
+            bg = "#FFFFFF" if r_i % 2 == 0 else "#F7F7F8"
+            self.create_rectangle(0, y0, width, y0 + ch, fill=bg, outline="")
+            self.create_text(
+                lw / 2,
+                y0 + ch / 2,
+                text=str(row["period"]),
+                fill=Theme.TEXT,
+                font=("Consolas", 8),
+            )
+            # 分区竖线背景
+            for zi in range(4):
+                x0 = lw + zi * 20 * cw
+                self.create_rectangle(
+                    x0, y0, x0 + 20 * cw, y0 + ch, fill=zone_colors[zi], outline=""
+                )
+            for cell in row["cells"]:
+                n = int(cell["num"])
+                x = lw + (n - 1) * cw + cw / 2
+                y = y0 + ch / 2
+                if cell["hit"]:
+                    r = min(cw, ch) / 2 - 2
+                    self.create_oval(
+                        x - r, y - r, x + r, y + r, fill=Theme.HIT_RED, outline=""
+                    )
+                    self.create_text(
+                        x, y, text=f"{n:02d}", fill="#ffffff", font=("Consolas", 7, "bold")
+                    )
+                else:
+                    omit = int(cell["omit"])
+                    color = Theme.OMIT_GRAY
+                    if omit >= 25:
+                        color = "#FB8C00"
+                    self.create_text(
+                        x, y, text=str(omit), fill=color, font=("Consolas", 7)
+                    )
+
+        # 分区分隔线
+        for zi in range(1, 4):
+            x = lw + zi * 20 * cw
+            self.create_line(x, 0, x, height, fill="#BDBDBD")
+
+        self.configure(scrollregion=(0, 0, width, height))
+
+
+class Kl8Panel(ttk.Frame):
+    def __init__(
+        self,
+        master,
+        status_callback: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(master, **kwargs)
+        self.status_callback = status_callback
+        self._period_map: List[int] = []
+        self.status_var = tk.StringVar(value="")
+        self._last_result = None
+        self._build_ui()
+        self._refresh_weight_label()
+        self.refresh_status()
+
+    def _build_ui(self) -> None:
+        tip = card_frame(self)
+        tip.pack(fill="x", padx=12, pady=(8, 4))
+        inner = ttk.Frame(tip, style="Card.TFrame", padding=(16, 8))
+        inner.pack(fill="x")
+        accent = tk.Frame(inner, bg=Theme.KL8, width=4)
+        accent.pack(side="left", fill="y", padx=(0, 12))
+        txt = ttk.Frame(inner, style="Card.TFrame")
+        txt.pack(side="left", fill="x", expand=True)
+        ttk.Label(txt, text="快乐8 · 走势图选十", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(txt, textvariable=self.status_var, style="Status.TLabel").pack(
+            anchor="w", pady=(2, 0)
+        )
+
+        self.nb = ttk.Notebook(self, style="Inner.TNotebook")
+        self.nb.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self.tab_predict = ttk.Frame(self.nb, style="Card.TFrame", padding=12)
+        self.tab_trend = ttk.Frame(self.nb, style="Card.TFrame", padding=8)
+        self.tab_input = ttk.Frame(self.nb, style="Card.TFrame", padding=10)
+        self.nb.add(self.tab_predict, text="  选十预测  ")
+        self.nb.add(self.tab_trend, text="  基本走势图  ")
+        self.nb.add(self.tab_input, text="  录入 / 导入  ")
+        self._input_paned: Optional[ttk.Panedwindow] = None
+        self._form_max = 300
+        self._build_predict_tab()
+        self._build_trend_tab()
+        self._build_input_tab()
+        self.nb.bind("<<NotebookTabChanged>>", self._on_inner_tab)
+
+        foot = ttk.Frame(self, padding=(12, 0, 12, 6))
+        foot.pack(fill="x")
+        ttk.Label(
+            foot,
+            text=f"数据目录：{kl8api.DATA_PATH}　｜　模型仅供统计参考，请理性购彩",
+            style="Hint.TLabel",
+        ).pack(anchor="w")
+
+    def _build_predict_tab(self) -> None:
+        bar = ttk.Frame(self.tab_predict, style="Card.TFrame")
+        bar.pack(fill="x")
+        self.btn_predict = BubbleButton(
+            bar,
+            text="生成3组选十",
+            command=self.run_predict,
+            bg_color=Theme.KL8,
+            hover_color=Theme.KL8_HOVER,
+            width=130,
+            height=36,
+        )
+        self.btn_predict.pack(side="left")
+        ttk.Button(bar, text="刷新状态", style="Ghost.TButton", command=self.refresh_status).pack(
+            side="left", padx=8
+        )
+        ttk.Button(
+            bar, text="对比上次预测", style="Ghost.TButton", command=self.compare_latest_draw
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            bar, text="复制结果", style="Ghost.TButton", command=self.copy_result
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            bar, text="重置规则权重", style="Ghost.TButton", command=self.reset_weights
+        ).pack(side="left", padx=4)
+        self.next_period_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.next_period_var, style="Status.TLabel").pack(side="right")
+
+        self.recent_var = tk.StringVar(value="")
+        ttk.Label(self.tab_predict, textvariable=self.recent_var, style="CardHint.TLabel").pack(
+            anchor="w", pady=(8, 2)
+        )
+        self.weight_var = tk.StringVar(value="")
+        ttk.Label(self.tab_predict, textvariable=self.weight_var, style="CardHint.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
+
+        table_box = ttk.Frame(self.tab_predict, style="Card.TFrame")
+        table_box.pack(fill="both", expand=True)
+        cols = ("group", "focus", "nums", "score")
+        self.tree = ttk.Treeview(table_box, columns=cols, show="headings", height=6)
+        heads = {
+            "group": ("组别", 110),
+            "focus": ("规则侧重", 280),
+            "nums": ("选十号码", 320),
+            "score": ("综合分", 70),
+        }
+        for c, (title, w) in heads.items():
+            self.tree.heading(c, text=title)
+            self.tree.column(c, width=w, anchor="center" if c != "focus" else "w")
+        scroll = ttk.Scrollbar(table_box, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self.dan_var = tk.StringVar(value="")
+        self.tuo_var = tk.StringVar(value="")
+        ttk.Label(self.tab_predict, textvariable=self.dan_var, style="PanelTitle.TLabel").pack(
+            anchor="w", pady=(8, 2)
+        )
+        ttk.Label(self.tab_predict, textvariable=self.tuo_var, style="CardHint.TLabel").pack(
+            anchor="w"
+        )
+
+        tip_box = ttk.Frame(self.tab_predict, style="Card.TFrame")
+        tip_box.pack(fill="both", expand=True, pady=(8, 0))
+        ttk.Label(tip_box, text="规则分析", style="Card.TLabel").pack(anchor="w")
+        self.tips = tk.Text(
+            tip_box,
+            height=8,
+            wrap="word",
+            font=Theme.FONT_HINT,
+            bg="#F9F9FB",
+            fg=Theme.TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=Theme.BORDER,
+        )
+        self.tips.pack(fill="both", expand=True, pady=(4, 0))
+        self.tips.configure(state="disabled")
+
+    def _build_trend_tab(self) -> None:
+        bar = ttk.Frame(self.tab_trend, style="Card.TFrame")
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="显示期数", style="Card.TLabel").pack(side="left")
+        self.trend_n_var = tk.StringVar(value="50")
+        ttk.Spinbox(
+            bar, from_=20, to=300, width=5, textvariable=self.trend_n_var, values=(30, 50, 100, 300)
+        ).pack(side="left", padx=(6, 10))
+        BubbleButton(
+            bar,
+            text="刷新走势图",
+            command=self.refresh_trend,
+            bg_color=Theme.KL8,
+            hover_color=Theme.KL8_HOVER,
+            width=120,
+            height=34,
+        ).pack(side="left")
+        ttk.Label(
+            bar,
+            text="红圈=开出　灰字=遗漏　橙色=遗漏≥25",
+            style="CardHint.TLabel",
+        ).pack(side="right")
+
+        wrap = ttk.Frame(self.tab_trend, style="Card.TFrame")
+        wrap.pack(fill="both", expand=True)
+        self.trend_canvas = Kl8TrendCanvas(wrap)
+        yscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.trend_canvas.yview)
+        xscroll = ttk.Scrollbar(wrap, orient="horizontal", command=self.trend_canvas.xview)
+        self.trend_canvas.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.trend_canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        self.trend_summary = tk.StringVar(value="")
+        ttk.Label(self.tab_trend, textvariable=self.trend_summary, style="CardHint.TLabel").pack(
+            anchor="w", pady=(6, 0)
+        )
+
+    def _build_input_tab(self) -> None:
+        paned = ttk.Panedwindow(self.tab_input, orient=tk.VERTICAL)
+        paned.pack(fill="both", expand=True)
+        self._input_paned = paned
+        self._form_max = 300
+
+        form_wrap = ttk.Frame(paned, style="Card.TFrame")
+        form = ttk.LabelFrame(form_wrap, text="录入最新开奖号码", padding=(14, 10))
+        form.pack(fill="x", expand=False)
+        ttk.Label(
+            form,
+            text="快乐8：每期 20 个号码（01-80），空格/逗号分隔",
+            style="CardHint.TLabel",
+        ).pack(anchor="w")
+
+        row1 = ttk.Frame(form, style="Card.TFrame")
+        row1.pack(fill="x", pady=(8, 4))
+        ttk.Label(row1, text="期号", style="Pos.TLabel").pack(side="left")
+        self.period_var = tk.StringVar(value="")
+        ttk.Entry(row1, textvariable=self.period_var, width=14).pack(side="left", padx=(8, 16))
+        ttk.Label(row1, text="日期", style="Pos.TLabel").pack(side="left")
+        self.date_var = tk.StringVar(value="")
+        ttk.Entry(row1, textvariable=self.date_var, width=14).pack(side="left", padx=(8, 0))
+
+        row2 = ttk.Frame(form, style="Card.TFrame")
+        row2.pack(fill="x", pady=4)
+        ttk.Label(row2, text="号码", style="Pos.TLabel").pack(side="left")
+        self.nums_var = tk.StringVar(value="")
+        ttk.Entry(row2, textvariable=self.nums_var).pack(
+            side="left", fill="x", expand=True, padx=(8, 0)
+        )
+
+        btns = ttk.Frame(form, style="Card.TFrame")
+        btns.pack(fill="x", pady=(10, 0))
+        BubbleButton(
+            btns,
+            text="保存本期",
+            command=self.save_draw,
+            bg_color=Theme.KL8,
+            hover_color=Theme.KL8_HOVER,
+            width=110,
+            height=34,
+        ).pack(side="left")
+        ttk.Button(btns, text="导入 CSV", style="Ghost.TButton", command=self.import_csv).pack(
+            side="left", padx=8
+        )
+        ttk.Button(
+            btns, text="删除选中期", style="Ghost.TButton", command=self.delete_selected
+        ).pack(side="left", padx=4)
+        ttk.Button(btns, text="删除最新期", style="Ghost.TButton", command=self.delete_latest).pack(
+            side="left", padx=4
+        )
+        ttk.Button(btns, text="清空历史", style="Ghost.TButton", command=self.clear_history).pack(
+            side="left", padx=4
+        )
+
+        hist_wrap = ttk.Frame(paned, style="Card.TFrame")
+        hist = ttk.LabelFrame(hist_wrap, text="历史开奖", padding=(8, 6))
+        hist.pack(fill="both", expand=True)
+        cols = ("period", "date", "nums")
+        self.hist = ttk.Treeview(hist, columns=cols, show="headings", height=12)
+        self.hist.heading("period", text="期号")
+        self.hist.heading("date", text="日期")
+        self.hist.heading("nums", text="开奖号码（20）")
+        self.hist.column("period", width=90, anchor="center")
+        self.hist.column("date", width=100, anchor="center")
+        self.hist.column("nums", width=620, anchor="w")
+        hscroll = ttk.Scrollbar(hist, orient="vertical", command=self.hist.yview)
+        self.hist.configure(yscrollcommand=hscroll.set)
+        self.hist.pack(side="left", fill="both", expand=True)
+        hscroll.pack(side="right", fill="y")
+
+        paned.add(form_wrap, weight=0)
+        paned.add(hist_wrap, weight=1)
+        self.after(80, self.ensure_history_layout)
+
+    def _on_inner_tab(self, _event=None) -> None:
+        try:
+            tab = self.nb.select()
+            if tab == str(self.tab_input):
+                self.after(40, self.ensure_history_layout)
+            elif tab == str(self.tab_trend):
+                self.after(40, self.refresh_trend)
+        except tk.TclError:
+            pass
+
+    def ensure_history_layout(self) -> None:
+        if self._input_paned is not None:
+            _set_history_sash(self._input_paned, self.tab_input, self._form_max)
+
+    def _notify(self, text: str) -> None:
+        if self.status_callback:
+            self.status_callback(text)
+
+    def _refresh_weight_label(self) -> None:
+        w = kl8api.load_algo_weights()
+        parts = [
+            f"{kl8api.ALGO_NAMES[k]}{w[k]:.0%}"
+            for k in ("gap3", "gap4", "gap6", "hot_cold", "zone_sym")
+        ]
+        self.weight_var.set("规则权重：" + " · ".join(parts))
+
+    def refresh_status(self) -> None:
+        draws = kl8api.load_history()
+        if not draws:
+            self.status_var.set("尚未录入快乐8历史数据，可导入「快乐8_近100期开奖数据.csv」")
+            self.recent_var.set("")
+            self.next_period_var.set("")
+            self._fill_history([])
+            self._notify("快乐8：无历史数据")
+            return
+        last = draws[-1]
+        self.status_var.set(
+            f"已录入 {len(draws)} 期 | 最新 {last['period']}期：{kl8api.fmt_nums(last['nums'])}"
+        )
+        self.recent_var.set(
+            "近5期："
+            + " ｜ ".join(
+                f"{d['period']}:{kl8api.fmt_nums(d['nums']).replace(' ', '')}"
+                for d in draws[-5:]
+            )
+        )
+        self.next_period_var.set(f"下一期建议：{int(last['period']) + 1}")
+        self._fill_history(draws)
+        self._suggest_period(draws)
+        self._notify(f"快乐8：{len(draws)} 期 | 最新 {last['period']}")
+
+    def _fill_history(self, draws) -> None:
+        self.hist.delete(*self.hist.get_children())
+        self._period_map = []
+        for d in reversed(draws):
+            self.hist.insert(
+                "",
+                "end",
+                values=(d["period"], d.get("date", ""), kl8api.fmt_nums(d["nums"])),
+            )
+            self._period_map.append(int(d["period"]))
+
+    def _suggest_period(self, draws) -> None:
+        if not self.period_var.get().strip() and draws:
+            self.period_var.set(str(int(draws[-1]["period"]) + 1))
+
+    def _parse_nums(self, text: str) -> List[int]:
+        return kl8api._parse_num_token(text)
+
+    def save_draw(self) -> None:
+        try:
+            period = int("".join(c for c in self.period_var.get() if c.isdigit()))
+            nums = self._parse_nums(self.nums_var.get())
+            if len(set(nums)) != kl8api.DRAW_COUNT:
+                raise ValueError(f"需要正好 {kl8api.DRAW_COUNT} 个不重复号码")
+            kl8api.add_draw(period, nums, self.date_var.get().strip())
+            self.nums_var.set("")
+            self.refresh_status()
+            self.refresh_trend()
+            messagebox.showinfo("成功", f"已保存 {period} 期")
+        except Exception as e:
+            messagebox.showerror("录入失败", str(e))
+
+    def import_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="导入快乐8 CSV",
+            filetypes=[("CSV", "*.csv"), ("全部文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            draws = kl8api.import_csv(path)
+            self.refresh_status()
+            self.refresh_trend()
+            messagebox.showinfo("导入完成", f"当前共 {len(draws)} 期历史数据")
+        except Exception as e:
+            messagebox.showerror("导入失败", str(e))
+
+    def delete_selected(self) -> None:
+        sel = self.hist.selection()
+        if not sel:
+            messagebox.showwarning("提示", "请先选中要删除的期号")
+            return
+        item = sel[0]
+        period = int(self.hist.item(item, "values")[0])
+        if not messagebox.askyesno("确认", f"删除期号 {period}？"):
+            return
+        try:
+            kl8api.delete_draw(period)
+            self.refresh_status()
+            self.refresh_trend()
+        except Exception as e:
+            messagebox.showerror("删除失败", str(e))
+
+    def delete_latest(self) -> None:
+        draws = kl8api.load_history()
+        if not draws:
+            return
+        last = draws[-1]
+        if not messagebox.askyesno(
+            "确认",
+            f"删除最新期 {last['period']}？\n{kl8api.fmt_nums(last['nums'])}",
+        ):
+            return
+        kl8api.delete_latest()
+        self.refresh_status()
+        self.refresh_trend()
+
+    def clear_history(self) -> None:
+        if not messagebox.askyesno("确认", "清空全部快乐8历史？此操作不可恢复"):
+            return
+        kl8api.clear_all_history()
+        self.refresh_status()
+        self.refresh_trend()
+
+    def reset_weights(self) -> None:
+        kl8api.reset_algo_weights()
+        self._refresh_weight_label()
+        messagebox.showinfo("完成", "规则权重已恢复默认")
+
+    def refresh_trend(self) -> None:
+        draws = kl8api.load_history()
+        try:
+            n = int(self.trend_n_var.get())
+        except ValueError:
+            n = 50
+        rows = kl8api.build_trend_matrix(draws, recent=n)
+        self.trend_canvas.set_rows(rows)
+        if not rows:
+            self.trend_summary.set("")
+            return
+        last = rows[-1]
+        hits = [c["num"] for c in last["cells"] if c["hit"]]
+        omit = kl8api.compute_omissions(draws)
+        cold = sorted((o, n) for n, o in omit.items() if o >= 25)[-8:]
+        cold_txt = " ".join(f"{n:02d}({o})" for o, n in cold) if cold else "-"
+        gaps = kl8api.find_gaps(hits)
+        gap_txt = " ".join(f"{a:02d}-{b:02d}" for a, b in gaps[:8])
+        self.trend_summary.set(
+            f"最新 {last['period']} | 开出 {kl8api.fmt_nums(hits)} | "
+            f"空位 {gap_txt} | 遗漏≥25：{cold_txt}"
+        )
+
+    def run_predict(self) -> None:
+        draws = kl8api.load_history()
+        if len(draws) < 5:
+            messagebox.showwarning("提示", "历史数据不足 5 期，请先导入 CSV")
+            return
+        try:
+            model = kl8api.TrendPredictor()
+            model.fit(draws)
+            result = model.predict_groups()
+            kl8api.save_last_prediction(result)
+            self._last_result = result
+            self._show_result(result)
+            self._refresh_weight_label()
+            self._notify(f"快乐8：已生成 3 组选十 → {result['target_period']} 期")
+        except Exception as e:
+            messagebox.showerror("预测失败", str(e))
+
+    def _show_result(self, result: dict) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self.next_period_var.set(f"目标期 {result['target_period']}")
+        for g in result["groups"]:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    g["name"],
+                    g["focus"],
+                    kl8api.fmt_nums(g["nums"]),
+                    f"{g['score']:.3f}",
+                ),
+            )
+        self.dan_var.set(f"胆码（选五/选六定胆）：{kl8api.fmt_nums(result['dan'])}")
+        self.tuo_var.set(
+            f"拖码建议：{kl8api.fmt_nums(result.get('tuo', [])[:10])}　｜　"
+            "选七以上可用胆拖（定3-4胆）"
+        )
+        self.tips.configure(state="normal")
+        self.tips.delete("1.0", "end")
+        self.tips.insert("1.0", "\n".join(f"· {t}" for t in result.get("tips", [])))
+        self.tips.configure(state="disabled")
+
+    def copy_result(self) -> None:
+        if not self._last_result:
+            messagebox.showwarning("提示", "请先生成预测")
+            return
+        text = kl8api.format_prediction_text(self._last_result)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("已复制", "预测结果已复制到剪贴板")
+
+    def compare_latest_draw(self) -> None:
+        draws = kl8api.load_history()
+        if not draws:
+            messagebox.showwarning("提示", "没有开奖数据可对比")
+            return
+        pred = kl8api.load_last_prediction()
+        if not pred:
+            messagebox.showwarning("提示", "没有上次预测记录，请先生成选十")
+            return
+        last = draws[-1]
+        try:
+            result = kl8api.compare_prediction_to_draw(
+                last["nums"], period=int(last["period"])
+            )
+        except Exception as e:
+            messagebox.showerror("对比失败", str(e))
+            return
+        self._refresh_weight_label()
+        win = tk.Toplevel(self)
+        win.title("快乐8 预测对比")
+        win.geometry("720x420")
+        win.configure(bg=Theme.BG)
+        ttk.Label(
+            win,
+            text=f"开奖 {result['period']}：{kl8api.fmt_nums(result['actual'])}",
+            style="PanelTitle.TLabel",
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+        cols = ("name", "nums", "hit", "hit_nums")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=6)
+        for c, t, w in (
+            ("name", "组别", 120),
+            ("nums", "预测选十", 280),
+            ("hit", "命中", 60),
+            ("hit_nums", "命中号码", 200),
+        ):
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="center")
+        tree.pack(fill="both", expand=True, padx=12, pady=6)
+        for g in result["groups"]:
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    g["name"],
+                    kl8api.fmt_nums(g["nums"]),
+                    f"{g['hit_count']}/10",
+                    kl8api.fmt_nums(g["hit_nums"]) or "-",
+                ),
+            )
+        ttk.Label(
+            win,
+            text=f"胆码命中：{kl8api.fmt_nums(result['dan_hit']) or '-'} / {kl8api.fmt_nums(result['dan'])}"
+            + ("　｜　已按命中微调规则权重" if result.get("adjusted") else ""),
+            style="CardHint.TLabel",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+        ttk.Button(
+            win,
+            text="复制对比",
+            style="Ghost.TButton",
+            command=lambda: (
+                self.clipboard_clear(),
+                self.clipboard_append(kl8api.format_compare_text(result)),
+            ),
+        ).pack(anchor="e", padx=12, pady=(0, 12))
+
+
 # 主窗口
 # ---------------------------------------------------------------------------
 
@@ -1736,12 +2384,14 @@ class LotteryApp(tk.Tk):
         super().__init__()
         pl3api.ensure_data_files()
         dltapi.ensure_data_files()
+        kl8api.ensure_data_files()
         self.title(APP_TITLE)
         self.geometry(WIN_SIZE)
         self.minsize(*WIN_MIN)
         apply_theme(self)
         self.hero_status = tk.StringVar(value="")
         self._active = 0
+        self._panels: List[ttk.Frame] = []
         self._build_hero()
         self._build_body()
         self.after(150, self._startup_predict)
@@ -1754,7 +2404,7 @@ class LotteryApp(tk.Tk):
         left.pack(side="left", fill="y", padx=20, pady=12)
         ttk.Label(left, text=APP_TITLE, style="HeroTitle.TLabel").pack(anchor="w")
         ttk.Label(
-            left, text="排列三 · 大乐透｜算法独立分区", style="HeroSub.TLabel"
+            left, text="排列三 · 大乐透 · 快乐8｜算法独立分区", style="HeroSub.TLabel"
         ).pack(anchor="w")
         right = tk.Frame(hero, bg=Theme.HEADER)
         right.pack(side="right", fill="y", padx=20, pady=18)
@@ -1769,14 +2419,13 @@ class LotteryApp(tk.Tk):
         wrap = ttk.Frame(self, padding=(14, 10, 14, 12))
         wrap.pack(fill="both", expand=True)
 
-        # iOS 胶囊切换，替代僵硬 Notebook 外层标签
         switch_row = ttk.Frame(wrap)
         switch_row.pack(fill="x", pady=(0, 10))
         self.segment = SegmentedControl(
             switch_row,
-            labels=["排列三", "大乐透"],
+            labels=["排列三", "大乐透", "快乐8"],
             command=self._switch_zone,
-            width=300,
+            width=420,
             height=42,
         )
         self.segment.pack(anchor="center")
@@ -1786,25 +2435,23 @@ class LotteryApp(tk.Tk):
 
         self.pl3_panel = Pl3Panel(self.content, status_callback=self._set_hero_status)
         self.dlt_panel = DltPanel(self.content, status_callback=self._set_hero_status)
+        self.kl8_panel = Kl8Panel(self.content, status_callback=self._set_hero_status)
+        self._panels = [self.pl3_panel, self.dlt_panel, self.kl8_panel]
         self.pl3_panel.pack(fill="both", expand=True)
-        # dlt 先不显示
         self.pl3_panel.refresh_status()
 
     def _switch_zone(self, index: int) -> None:
         self._active = index
-        if index == 0:
-            self.dlt_panel.pack_forget()
-            self.pl3_panel.pack(fill="both", expand=True)
-            self.pl3_panel.refresh_status()
-            self.after(40, self.pl3_panel.ensure_history_layout)
-        else:
-            self.pl3_panel.pack_forget()
-            self.dlt_panel.pack(fill="both", expand=True)
-            self.dlt_panel.refresh_status()
-            # 大乐透此前隐藏，必须切过来后重算历史区高度
-            self.after(40, self.dlt_panel.ensure_history_layout)
-            self.after(160, self.dlt_panel.ensure_history_layout)
-            self.after(400, self.dlt_panel.ensure_history_layout)
+        for p in self._panels:
+            p.pack_forget()
+        panel = self._panels[index]
+        panel.pack(fill="both", expand=True)
+        panel.refresh_status()
+        if hasattr(panel, "ensure_history_layout"):
+            self.after(40, panel.ensure_history_layout)
+            self.after(160, panel.ensure_history_layout)
+        if index == 2 and hasattr(panel, "refresh_trend"):
+            self.after(80, panel.refresh_trend)
 
     def _startup_predict(self) -> None:
         try:
@@ -1814,7 +2461,7 @@ class LotteryApp(tk.Tk):
 
 
 def main() -> None:
-    # 保证从 lottery_suite 目录运行时可找到 pl3 / dlt
+    # 保证从 lottery_suite 目录运行时可找到 pl3 / dlt / kl8
     if getattr(sys, "frozen", False):
         pass
     app = LotteryApp()
