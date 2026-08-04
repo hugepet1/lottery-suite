@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "period": 2026188,
+    "hits": [
+      5,
+      2,
+      2
+    ],
+    "dan_hit": 2,
+    "adjusted": true
+  }
+]
