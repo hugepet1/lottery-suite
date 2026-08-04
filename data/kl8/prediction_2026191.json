@@ -274,5 +274,116 @@
     "推荐胆码（选五/选六定胆）：05 15 18 64",
     "选七以上建议胆拖：定 3–4 胆 + 拖码，控制成本。",
     "选五：每组 5 码单式；复式六：每组 6 码可打选五复式（C(6,5)=6 注）或选六。"
+  ],
+  "actual": [
+    1,
+    2,
+    5,
+    6,
+    13,
+    15,
+    23,
+    28,
+    32,
+    34,
+    37,
+    42,
+    45,
+    46,
+    53,
+    55,
+    71,
+    73,
+    75,
+    77
+  ],
+  "compare": [
+    {
+      "name": "A组·空位连号",
+      "hit_count": 4,
+      "hit_total": 10,
+      "hit_nums": [
+        5,
+        13,
+        15,
+        46
+      ]
+    },
+    {
+      "name": "B组·斜连对称",
+      "hit_count": 2,
+      "hit_total": 10,
+      "hit_nums": [
+        15,
+        77
+      ]
+    },
+    {
+      "name": "C组·冷热跨度",
+      "hit_count": 4,
+      "hit_total": 10,
+      "hit_nums": [
+        5,
+        6,
+        32,
+        42
+      ]
+    }
+  ],
+  "compare_x5": [
+    {
+      "name": "A组·选五",
+      "hit_count": 1,
+      "hit_total": 5,
+      "hit_nums": [
+        5
+      ]
+    },
+    {
+      "name": "B组·选五",
+      "hit_count": 1,
+      "hit_total": 5,
+      "hit_nums": [
+        34
+      ]
+    },
+    {
+      "name": "C组·选五",
+      "hit_count": 1,
+      "hit_total": 5,
+      "hit_nums": [
+        5
+      ]
+    }
+  ],
+  "compare_x6": [
+    {
+      "name": "A组·复式六",
+      "hit_count": 1,
+      "hit_total": 6,
+      "hit_nums": [
+        5
+      ]
+    },
+    {
+      "name": "B组·复式六",
+      "hit_count": 0,
+      "hit_total": 6,
+      "hit_nums": []
+    },
+    {
+      "name": "C组·复式六",
+      "hit_count": 3,
+      "hit_total": 6,
+      "hit_nums": [
+        5,
+        23,
+        73
+      ]
+    }
+  ],
+  "dan_hit": [
+    5,
+    15
   ]
 }
