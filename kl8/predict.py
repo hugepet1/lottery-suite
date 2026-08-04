@@ -1502,17 +1502,32 @@ def compare_prediction_to_draw(
     dan = [int(x) for x in pred.get("dan", [])]
     dan_hit = sorted(set(dan) & actual)
 
-    # 按命中微调权重
+    # 按命中微调权重（同一期只调一次，避免重复放大）
     weights = load_algo_weights()
     focus_map = {
         "A组·空位连号": ["gap3", "gap4", "gap6", "consec"],
         "B组·斜连对称": ["seal_diag", "zone_sym", "consec"],
         "C组·冷热跨度": ["hot_cold", "omit_cycle", "span_sym"],
     }
+    resolved_period = period or pred.get("target_period")
+    log = []
+    if COMPARE_LOG_PATH.exists():
+        try:
+            with COMPARE_LOG_PATH.open("r", encoding="utf-8") as f:
+                log = json.load(f)
+        except Exception:
+            log = []
+    already = any(int(x.get("period", -1)) == int(resolved_period) for x in log)
+
     best = max(rows, key=lambda r: r["hit_count"]) if rows else None
     worst = min(rows, key=lambda r: r["hit_count"]) if rows else None
     adjusted = False
-    if best and worst and best["hit_count"] != worst["hit_count"]:
+    if (
+        not already
+        and best
+        and worst
+        and best["hit_count"] != worst["hit_count"]
+    ):
         for k in focus_map.get(best["name"], []):
             weights[k] = weights.get(k, 0.1) * 1.08
         for k in focus_map.get(worst["name"], []):
@@ -1523,7 +1538,7 @@ def compare_prediction_to_draw(
         adjusted = True
 
     result = {
-        "period": period or pred.get("target_period"),
+        "period": resolved_period,
         "actual": sorted(actual),
         "groups": rows,
         "dan": dan,
@@ -1531,24 +1546,17 @@ def compare_prediction_to_draw(
         "weights": weights,
         "adjusted": adjusted,
     }
-    # 追加日志
-    log = []
-    if COMPARE_LOG_PATH.exists():
-        try:
-            with COMPARE_LOG_PATH.open("r", encoding="utf-8") as f:
-                log = json.load(f)
-        except Exception:
-            log = []
-    log.append(
-        {
-            "period": result["period"],
-            "hits": [r["hit_count"] for r in rows],
-            "dan_hit": len(dan_hit),
-            "adjusted": adjusted,
-        }
-    )
-    with COMPARE_LOG_PATH.open("w", encoding="utf-8") as f:
-        json.dump(log[-200:], f, ensure_ascii=False, indent=2)
+    if not already:
+        log.append(
+            {
+                "period": result["period"],
+                "hits": [r["hit_count"] for r in rows],
+                "dan_hit": len(dan_hit),
+                "adjusted": adjusted,
+            }
+        )
+        with COMPARE_LOG_PATH.open("w", encoding="utf-8") as f:
+            json.dump(log[-200:], f, ensure_ascii=False, indent=2)
     return result
 
 
