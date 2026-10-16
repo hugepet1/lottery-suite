@@ -1,0 +1,10 @@
+## Snitch
+
+- Where: https://github.com/snitch-org/snitch
+- What: Lightweight C++20 testing framework.
+- License: Boost Software License 1.0
+
+Snitch is a C++20 testing framework.
+
+Slightly modified to fix some problems with recent MSVC and Apple/Clang. See
+lines with // **MODIFIED**
