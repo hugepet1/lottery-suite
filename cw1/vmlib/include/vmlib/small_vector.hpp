@@ -109,7 +109,7 @@ struct SmallVec<3, tType>
 template< typename tType >
 struct SmallVec<4, tType>
 {
-    tType x, y, z, r;
+    tType x, y, z, w;
 
     constexpr
     tType& operator[] (std::size_t aIdx) noexcept
