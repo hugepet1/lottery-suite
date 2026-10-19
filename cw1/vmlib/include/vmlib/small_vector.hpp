@@ -82,11 +82,53 @@ struct SmallVec<2,tType>
 		return &x;
 	}
 };
-template< typename tType >    //3D
+template< typename tType >//3D
 struct SmallVec<3, tType>
 {
     tType x, y, z;
-	
+
+    constexpr
+    tType& operator[] (std::size_t aIdx) noexcept
+    {
+        assert(aIdx < 3);
+        return (&x)[aIdx];
+    }
+
+    constexpr
+    tType operator[] (std::size_t aIdx) const noexcept
+    {
+        assert(aIdx < 3);
+        return (&x)[aIdx];
+    }
+
+    tType const* data() const noexcept
+    {
+        return &x;
+    }
+};
+template< typename tType >
+struct SmallVec<4, tType>
+{
+    tType x, y, z, r;
+
+    constexpr
+    tType& operator[] (std::size_t aIdx) noexcept
+    {
+        assert(aIdx <4);
+        return (&x)[aIdx];
+    }
+
+    constexpr
+    tType operator[] (std::size_t aIdx) const noexcept
+    {
+        assert(aIdx <4);
+        return (&x)[aIdx];
+    }
+
+    tType const* data() const noexcept
+    {
+        return &x;
+    }
 };
 
 // Helpers
@@ -114,79 +156,138 @@ SmallVec<tSize, tType> operator- (SmallVec<tSize,tType> const& aVec ) noexcept
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType> operator+ (SmallVec<tSize,tType> const& aLhs, SmallVec<tSize,tType> const& aRhs ) noexcept
 {
-	return {}; //TODO: implement me
+	SmallVec<tSize, tType> add{};
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    	ret[i] = aLhs[i] + aRhs[i];
+	}
+	return add;
 }
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType> operator- (SmallVec<tSize,tType> const& aLhs, SmallVec<tSize,tType> const& aRhs ) noexcept
 {
-	return {}; //TODO: implement me
+	SmallVec<tSize, tType> sub{};
+
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    	sub[i] = aLhs[i] - aRhs[i];
+	}
+
+	return sub;
 }
 
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType> operator* (tType aScalar, SmallVec<tSize,tType> const& aRhs ) noexcept
 {
-	return {}; //TODO: implement me
+	SmallVec<tSize, tType> mult{};
+
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    	mult[i] = aLhs[i] * aRhs[i];
+	}
+
+	return mult;	
 }
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType> operator* (SmallVec<tSize,tType> const& aLhs, tType aScalar ) noexcept
 {
-	return {}; //TODO: implement me
+	SmallVec<tSize, tType> mult{};
+
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    	mult[i] = aLhs[i] * aScalar;
+	}
+
+	return mult;	
 }
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType> operator/ (SmallVec<tSize,tType> const& aLhs, tType aScalar ) noexcept
 {
-	return {}; //TODO: implement me
+	SmallVec<tSize, tType> mult{};
+
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    	mult[i] = aLhs[i] / aScalar;
+	}
+
+	return mult;
 }
 
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType>& operator+= (SmallVec<tSize,tType>& aLhs, SmallVec<tSize,tType> const& aRhs ) noexcept
 {
-	//TODO: implement me
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    aLhs[i] = aLhs[i] + aRhs[i];
+	}
+
 	return aLhs; // Note: operator+= must return a reference to the LHS
 }
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType>& operator-= (SmallVec<tSize,tType>& aLhs, SmallVec<tSize,tType> const& aRhs ) noexcept
 {
-	//TODO: implement me
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    aLhs[i] = aLhs[i] - aRhs[i];
+	}
+
 	return aLhs; // Note: operator-= must return a reference to the LHS
 }
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType>& operator*= (SmallVec<tSize,tType>& aLhs, tType aScalar ) noexcept
 {
-	//TODO: implement me
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    aLhs[i] = aLhs[i] * aScalar;
+	}
 	return aLhs; // Note: operator*= must return a reference to the LHS
 }
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize, tType>& operator/= (SmallVec<tSize,tType>& aLhs, tType aScalar ) noexcept
 {
-	//TODO: implement me
-	return aLhs; // Note: operator/= must return a reference to the LHS
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+    aLhs[i] = aLhs[i] / aScalar;
+	}
+	return aLhs; // Note: operator*= must return a reference to the LHS // Note: operator/= must return a reference to the LHS
 }
 
 // Common operations
 template< std::size_t tSize, typename tType > constexpr
 tType dot( SmallVec<tSize,tType> const& aLhs, SmallVec<tSize,tType> const& aRhs ) noexcept
 {
-	return tType(0); //TODO: implement me
+	tType result = tType(0);
+
+	for (std::size_t i = 0; i < tSize; ++i)
+	{
+   	result += aLhs[i] * aRhs[i];
+	}
+	return result;
 }
 
 template< std::size_t tSize, typename tType > inline
 tType length( SmallVec<tSize,tType> const& aVec ) noexcept
 {
-	return tType(0); //TODO: implement me
+	return tType(std::sqrt(dot(aVec, aVec)));
 }
 
 template< std::size_t tSize, typename tType > constexpr
 SmallVec<tSize,tType> normalize( SmallVec<tSize,tType> const& aVec ) noexcept
 {
-	return {}; //TODO: implement me
+	return aVec / length(aVec);
 }
 
 // Only for Vec<3,type>
 template< typename tType > constexpr
 SmallVec<3,tType> cross( SmallVec<3,tType> const& aLhs, SmallVec<3,tType> const& aRhs ) noexcept
 {
-	return {}; //TODO: implement me
+	SmallVec<3, tType> result{};
+
+	result.x = aLhs.y * aRhs.z - aLhs.z * aRhs.y;
+	result.y = aLhs.z * aRhs.x - aLhs.x * aRhs.z;
+	result.z = aLhs.x * aRhs.y - aLhs.y * aRhs.x;
+
+	return result;
 }
 
 #endif // SMALL_VECTOR_HPP_214E3703_A050_411A_834B_4E55AEEC18B8
