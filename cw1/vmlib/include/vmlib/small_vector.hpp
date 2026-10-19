@@ -82,7 +82,12 @@ struct SmallVec<2,tType>
 		return &x;
 	}
 };
-// TODO: Additional partial specializations go here
+template< typename tType >    //3D
+struct SmallVec<3, tType>
+{
+    tType x, y, z;
+	
+};
 
 // Helpers
 template< std::size_t tSize, typename tType > constexpr
