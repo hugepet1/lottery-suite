@@ -159,7 +159,7 @@ SmallVec<tSize, tType> operator+ (SmallVec<tSize,tType> const& aLhs, SmallVec<tS
 	SmallVec<tSize, tType> add{};
 	for (std::size_t i = 0; i < tSize; ++i)
 	{
-    	ret[i] = aLhs[i] + aRhs[i];
+    	add[i] = aLhs[i] + aRhs[i];
 	}
 	return add;
 }
@@ -183,7 +183,7 @@ SmallVec<tSize, tType> operator* (tType aScalar, SmallVec<tSize,tType> const& aR
 
 	for (std::size_t i = 0; i < tSize; ++i)
 	{
-    	mult[i] = aLhs[i] * aRhs[i];
+    	mult[i] = aScalar * aRhs[i];
 	}
 
 	return mult;	
