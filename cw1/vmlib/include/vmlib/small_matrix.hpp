@@ -67,7 +67,7 @@ SmallMat<tM,tP,tType> operator*( SmallMat<tM,tN,tType> const& aLhs, SmallMat<tN,
 	{
     	for (std::size_t j = 0; j < tP; ++j)
     	{
-        	for (std::size_t k = 0; k < tP; ++k)
+        	for (std::size_t k = 0; k < tN; ++k)
         	{
             result[i,j] += aLhs[i,k] * aRhs[k,j];
 		    }
@@ -80,6 +80,7 @@ SmallMat<tM,tP,tType> operator*( SmallMat<tM,tN,tType> const& aLhs, SmallMat<tN,
 template< std::size_t tM, std::size_t tN, typename tType > constexpr
 SmallVec<tM,tType> operator*( SmallMat<tM,tN,tType> const& aLeft, SmallVec<tN,tType> const& aRight ) noexcept
 {
+	SmallVec<tM, tType> result{};
 	for (std::size_t i = 0; i < tM; ++i)
 	{
     	for (std::size_t j = 0; j < tN; ++j)
@@ -126,15 +127,96 @@ tMatrix make_identity() noexcept
 }
 
 // For Task 2.1 only:
-template< std::size_t tN, typename tType, std::size_t tM > inline 
-void gauss( SmallMat<tN,tN,tType> aMat, SmallMat<tN,tM,tType>& aResult ) noexcept
+template< std::size_t tN, typename tType, std::size_t tM >inline
+void gauss(SmallMat<tN,tN,tType> aMat,SmallMat<tN,tM,tType>& aResult) noexcept
 {
-	// TODO-Task 2.1 only: implement me
+    for (std::size_t col = 0; col < tN; ++col)
+    {
+        std::size_t tRow = col;
+
+        for (std::size_t row = col + 1; row < tN; ++row)
+        {
+            if (std::abs(aMat[row,col])
+                > std::abs(aMat[tRow,col]))
+            {
+                tRow = row;
+            }
+        }
+
+        if (tRow != col)
+        {
+            for (std::size_t j = 0; j < tN; ++j)
+            {
+                tType temp = aMat[col,j];
+                aMat[col,j] = aMat[tRow,j];
+                aMat[tRow,j] = temp;
+            }
+
+            for (std::size_t j = 0; j < tM; ++j)
+            {
+                tType temp = aResult[col,j];
+                aResult[col,j] = aResult[tRow,j];
+                aResult[tRow,j] = temp;
+            }
+        }
+
+        for (std::size_t row = col + 1; row < tN; ++row)
+        {
+            tType factor = aMat[row,col] / aMat[col,col];
+
+            for (std::size_t j = col; j < tN; ++j)
+            {
+                aMat[row,j] -= factor * aMat[col,j];
+            }
+
+            for (std::size_t j = 0; j < tM; ++j)
+            {
+                aResult[row,j] -= factor * aResult[col,j];
+            }
+        }
+    }
+
+    for (std::size_t step = 0; step < tN; ++step)
+    {
+        std::size_t row = tN - 1 - step;
+        tType diagonal = aMat[row,row];
+
+        for (std::size_t j = row; j < tN; ++j)
+        {
+            aMat[row,j] /= diagonal;
+        }
+
+        for (std::size_t j = 0; j < tM; ++j)
+        {
+            aResult[row,j] /= diagonal;
+        }
+
+        for (std::size_t upper = 0; upper < row; ++upper)
+        {
+            tType factor = aMat[upper,row];
+
+            for (std::size_t j = row; j < tN; ++j)
+            {
+                aMat[upper,j] -= factor * aMat[row,j];
+            }
+
+            for (std::size_t j = 0; j < tM; ++j)
+            {
+                aResult[upper,j] -= factor * aResult[row,j];
+            }
+        }
+    }
 }
 
 template< std::size_t tN, typename tType > // Must be square!
-SmallMat<tN,tN,tType> invert( SmallMat<tN,tN,tType> const& ) noexcept;
+SmallMat<tN,tN,tType> invert( SmallMat<tN,tN,tType> const& aMat) noexcept
+{
+    auto result = make_identity<SmallMat<tN,tN,tType>>();
 
+    gauss(aMat, result);
+
+    return result;
+}
 template<>
 SmallMat<4,4,float> invert( SmallMat<4,4,float> const& ) noexcept;
 

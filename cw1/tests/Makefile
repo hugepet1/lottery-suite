@@ -75,9 +75,11 @@ GENERATED :=
 OBJECTS :=
 
 GENERATED += $(OBJDIR)/matrix_layout.o
+GENERATED += $(OBJDIR)/matrix_ops.o
 GENERATED += $(OBJDIR)/vec2.o
 GENERATED += $(OBJDIR)/vector_layout.o
 OBJECTS += $(OBJDIR)/matrix_layout.o
+OBJECTS += $(OBJDIR)/matrix_ops.o
 OBJECTS += $(OBJDIR)/vec2.o
 OBJECTS += $(OBJDIR)/vector_layout.o
 
@@ -144,6 +146,9 @@ endif
 # #############################################
 
 $(OBJDIR)/matrix_layout.o: matrix_layout.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/matrix_ops.o: matrix_ops.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/vec2.o: vec2.cpp
