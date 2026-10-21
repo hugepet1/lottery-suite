@@ -1,0 +1,23 @@
+Warning, results might be unstable:
+* CPU frequency scaling enabled: CPU 0 between 800.0 and 2,300.0 MHz
+* CPU governor is 'schedutil' but should be 'performance'
+
+Recommendations
+* Use 'pyperf system tune' before benchmarking. See https://github.com/psf/pyperf
+
+|               ns/op |                op/s |    err% |     total | benchmark
+|--------------------:|--------------------:|--------:|----------:|:----------
+|               14.09 |       70,967,615.40 |    3.3% |      0.83 | `multiply 4x4`
+|               16.06 |       62,255,619.71 |    1.3% |      0.82 | `inverse 4x4`
+|                1.43 |      701,423,509.74 |    8.9% |      0.78 | :wavy_dash: `multiply 2x2` (Unstable with ~36,432,959.7 iters. Increase `minEpochIterations` to e.g. 364329597)
+|               15.17 |       65,925,673.57 |    0.6% |      0.83 | `inverse 2x2`
+|               45.47 |       21,993,723.59 |    1.6% |      0.82 | `multiply 8x8`
+|              461.03 |        2,169,042.61 |    2.1% |      0.82 | `inverse 8x8`
+|              351.59 |        2,844,208.31 |    1.2% |      0.80 | `multiply 16x16`
+|            3,473.78 |          287,870.81 |    1.6% |      0.79 | `inverse 16x16`
+|            1,927.88 |          518,705.83 |    5.8% |      0.87 | :wavy_dash: `multiply 32x32` (Unstable with ~29,153.3 iters. Increase `minEpochIterations` to e.g. 291533)
+|           25,405.07 |           39,362.23 |    1.8% |      0.82 | `inverse 32x32`
+|           21,184.58 |           47,204.15 |    1.9% |      0.83 | `multiply 64x64`
+|          206,447.72 |            4,843.84 |    1.6% |      0.83 | `inverse 64x64`
+|          109,588.15 |            9,125.07 |    1.6% |      0.80 | `multiply 100x100`
+|          591,155.92 |            1,691.60 |    0.5% |      0.81 | `inverse 100x100`

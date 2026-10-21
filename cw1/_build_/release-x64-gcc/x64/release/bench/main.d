@@ -229,7 +229,10 @@
  /usr/include/c++/13/bits/hashtable.h \
  /usr/include/c++/13/bits/hashtable_policy.h \
  /usr/include/c++/13/bits/node_handle.h \
- /usr/include/c++/13/bits/erase_if.h /usr/include/linux/version.h
+ /usr/include/c++/13/bits/erase_if.h /usr/include/linux/version.h \
+ ../vmlib/include/vmlib/stdtypes.hpp \
+ ../vmlib/include/vmlib/small_vector.hpp /usr/include/c++/13/cassert \
+ /usr/include/assert.h ../vmlib/include/vmlib/small_matrix.hpp
 /usr/include/stdc-predef.h:
 ../third_party/nanobench/include/nanobench.h:
 /usr/include/c++/13/chrono:
@@ -517,3 +520,8 @@
 /usr/include/c++/13/bits/node_handle.h:
 /usr/include/c++/13/bits/erase_if.h:
 /usr/include/linux/version.h:
+../vmlib/include/vmlib/stdtypes.hpp:
+../vmlib/include/vmlib/small_vector.hpp:
+/usr/include/c++/13/cassert:
+/usr/include/assert.h:
+../vmlib/include/vmlib/small_matrix.hpp:
